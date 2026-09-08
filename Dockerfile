@@ -35,11 +35,19 @@ FROM base AS build
 
 # Install packages needed to build gems and node modules
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential git libyaml-dev node-gyp pkg-config python-is-python3 && \
+    apt-get install --no-install-recommends -y \
+    build-essential \
+    git \
+    libyaml-dev \
+    node-gyp \
+    pkg-config \
+    python-is-python3 \
+    yarnpkg && \
+    ln -sf /usr/bin/yarnpkg /usr/local/bin/yarn && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Install Node.js (needed for builds; kept in runtime for SSR)
-ARG NODE_VERSION=20.19.4
+ARG NODE_VERSION=22.23.2
 ENV PATH=/usr/local/node/bin:$PATH
 RUN curl -sL https://github.com/nodenv/node-build/archive/master.tar.gz | tar xz -C /tmp/ && \
     /tmp/node-build-master/bin/node-build "${NODE_VERSION}" /usr/local/node && \
