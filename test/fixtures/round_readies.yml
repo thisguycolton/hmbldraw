@@ -1,0 +1,11 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  round: one
+  player: one
+  ready_at: 2026-09-07 01:30:44
+
+two:
+  round: two
+  player: two
+  ready_at: 2026-09-07 01:30:44

@@ -1,0 +1,19 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  code: MyString
+  status: MyString
+  current_round: 1
+  total_rounds: 1
+  round_duration: 1
+  started_at: 2026-09-06 19:31:50
+  finished_at: 2026-09-06 19:31:50
+
+two:
+  code: MyString
+  status: MyString
+  current_round: 1
+  total_rounds: 1
+  round_duration: 1
+  started_at: 2026-09-06 19:31:50
+  finished_at: 2026-09-06 19:31:50

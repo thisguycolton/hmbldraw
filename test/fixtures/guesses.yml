@@ -1,0 +1,13 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  round: one
+  player: one
+  text: MyString
+  correct: false
+
+two:
+  round: two
+  player: two
+  text: MyString
+  correct: false
