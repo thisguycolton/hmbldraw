@@ -1,6 +1,6 @@
 import { Head } from "@inertiajs/react"
 import { useEffect, useRef, useState } from "react"
-import cable from "../../cable"
+import { getCableConsumer } from "../../cable"
 import GameCanvas from "../../components/GameCanvas"
 import RoundCarousel from "../../components/RoundCarousel"
 
@@ -107,181 +107,203 @@ function recordRoundGuesses(roundId, nextGuesses) {
   // --------------------------------------------------------------------------
   // Action Cable
   // --------------------------------------------------------------------------
+useEffect(() => {
+  // ------------------------------------------------------------------------
+  // Action Cable is browser-only.
+  //
+  // This component is rendered by Inertia SSR on the server, where
+  // window/document/WebSocket do not exist.
+  // ------------------------------------------------------------------------
 
-  useEffect(() => {
-    const token = getPlayerToken()
+  if (typeof window === "undefined") {
+    return
+  }
 
-    console.log(
-      `[ActionCable] Token ${
-        token ? "found" : "NOT FOUND"
-      } for room ${game_room.code}`
+  const cable = getCableConsumer()
+
+  if (!cable) {
+    console.warn(
+      `[ActionCable] No Cable consumer available for room ${game_room.code}`
     )
 
-    if (!token) {
-      console.warn(
-        `[ActionCable] No player token found for room ${game_room.code}`
-      )
+    return
+  }
 
-      return
-    }
+  const token = getPlayerToken()
 
-    const subscription = cable.subscriptions.create(
-      {
-        channel: "GameRoomChannel",
-        code: game_room.code,
-        player_token: token,
+  console.log(
+    `[ActionCable] Token ${
+      token ? "found" : "NOT FOUND"
+    } for room ${game_room.code}`
+  )
+
+  if (!token) {
+    console.warn(
+      `[ActionCable] No player token found for room ${game_room.code}`
+    )
+
+    return
+  }
+
+  const subscription = cable.subscriptions.create(
+    {
+      channel: "GameRoomChannel",
+      code: game_room.code,
+      player_token: token,
+    },
+    {
+      connected() {
+        console.log(
+          `[ActionCable] Connected to room ${game_room.code}`
+        )
+
+        setConnected(true)
       },
-      {
-        connected() {
-          console.log(
-            `[ActionCable] Connected to room ${game_room.code}`
-          )
 
-          setConnected(true)
-        },
+      disconnected() {
+        console.log(
+          `[ActionCable] Disconnected from room ${game_room.code}`
+        )
 
-        disconnected() {
-          console.log(
-            `[ActionCable] Disconnected from room ${game_room.code}`
-          )
+        setConnected(false)
+      },
 
-          setConnected(false)
-        },
+      rejected() {
+        console.error(
+          `[ActionCable] Subscription rejected for room ${game_room.code}`
+        )
 
-        rejected() {
-          console.error(
-            `[ActionCable] Subscription rejected for room ${game_room.code}`
-          )
+        setConnected(false)
+      },
 
-          setConnected(false)
-        },
+      received(data) {
+        console.log("[ActionCable] Received:", data)
 
-        received(data) {
-          console.log("[ActionCable] Received:", data)
+        // --------------------------------------------------------------
+        // Lobby
+        // --------------------------------------------------------------
 
-          // --------------------------------------------------------------
-          // Lobby
-          // --------------------------------------------------------------
+        if (data.type === "lobby_updated") {
+          setPlayers(data.players)
 
-          if (data.type === "lobby_updated") {
-            setPlayers(data.players)
+          if (data.game_room.status === "waiting") {
+            setGameState("waiting")
+          }
 
-            if (data.game_room.status === "waiting") {
-              setGameState("waiting")
-            }
+          return
+        }
 
+        // --------------------------------------------------------------
+        // Game started
+        // --------------------------------------------------------------
+
+        if (data.type === "game_started") {
+          console.log("[Game] Started:", data)
+
+          if (isStaleRound(data.round?.id)) {
             return
           }
 
-          // --------------------------------------------------------------
-          // Game started
-          // --------------------------------------------------------------
+          roundStrokesRef.current = {}
+          roundGuessesRef.current = {}
+          setCompletedRounds([])
 
-          if (data.type === "game_started") {
-            console.log("[Game] Started:", data)
+          setGameState(data.game_room.status)
+          setCurrentRound(data.round)
+          setGameError(null)
 
-            if (isStaleRound(data.round?.id)) {
-              return
-            }
+          return
+        }
 
-            roundStrokesRef.current = {}
-            roundGuessesRef.current = {}
-            setCompletedRounds([])
+        // --------------------------------------------------------------
+        // Round starting / ready phase
+        // --------------------------------------------------------------
 
-            setGameState(data.game_room.status)
-            setCurrentRound(data.round)
-            setGameError(null)
+        if (data.type === "round_starting") {
+          console.log("[Game] Round starting:", data)
 
-            return
-          }
-
-          // --------------------------------------------------------------
-          // Round starting / ready phase
-          // --------------------------------------------------------------
-
-          if (data.type === "round_starting") {
-            console.log("[Game] Round starting:", data)
-
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale round_starting:",
-                data.round?.id
-              )
-
-              return
-            }
-
-            setCurrentRound({
-              id: data.round.id,
-              number: data.round.number,
-              drawer: data.round.drawer,
-            })
-
-            setGameState((currentState) => {
-              if (currentState === "finished") {
-                return currentState
-              }
-
-              return "starting_round"
-            })
-
-            setReadyPlayerIds(data.ready_player_ids || [])
-
-            setIsReady(
-              (data.ready_player_ids || []).includes(
-                current_player?.id
-              )
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale round_starting:",
+              data.round?.id
             )
 
-            setSelectedWord(null)
-            setGameError(null)
-            replaceStrokes([])
-            replaceGuesses([])
-            setCorrectGuesser(null)
-
-            // Do NOT clear wordOptions here.
-
             return
           }
 
-          // --------------------------------------------------------------
-          // Drawing begins
-          // --------------------------------------------------------------
+          setCurrentRound({
+            id: data.round.id,
+            number: data.round.number,
+            drawer: data.round.drawer,
+          })
 
-          if (data.type === "round_started") {
-            console.log("[Game] Round started:", data)
-
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale round_started:",
-                data.round?.id
-              )
-
-              return
+          setGameState((currentState) => {
+            if (currentState === "finished") {
+              return currentState
             }
 
-            setGameState("drawing")
-            setCurrentRound(data.round)
+            return "starting_round"
+          })
 
-            setReadyPlayerIds([])
-            setIsReady(false)
-            setWordOptions([])
+          setReadyPlayerIds(data.ready_player_ids || [])
 
-            replaceStrokes(
-              Array.isArray(data.round?.strokes)
-                ? data.round.strokes
-                : []
+          setIsReady(
+            (data.ready_player_ids || []).includes(
+              current_player?.id
             )
+          )
 
-            replaceGuesses([])
+          setSelectedWord(null)
+          setGameError(null)
+          replaceStrokes([])
+          replaceGuesses([])
+          setCorrectGuesser(null)
 
-            setCorrectGuesser(null)
-            setRoundResult(null)
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Drawing begins
+        // --------------------------------------------------------------
+
+        if (data.type === "round_started") {
+          console.log("[Game] Round started:", data)
+
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale round_started:",
+              data.round?.id
+            )
 
             return
           }
 
-         if (data.type === "completed_rounds") {
+          setGameState("drawing")
+          setCurrentRound(data.round)
+
+          setReadyPlayerIds([])
+          setIsReady(false)
+          setWordOptions([])
+
+          replaceStrokes(
+            Array.isArray(data.round?.strokes)
+              ? data.round.strokes
+              : []
+          )
+
+          replaceGuesses([])
+
+          setCorrectGuesser(null)
+          setRoundResult(null)
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Completed rounds
+        // --------------------------------------------------------------
+
+        if (data.type === "completed_rounds") {
           console.log(
             "[Gallery] Received completed rounds:",
             data.rounds
@@ -308,291 +330,287 @@ function recordRoundGuesses(roundId, nextGuesses) {
           return
         }
 
-          // --------------------------------------------------------------
-          // Drawer receives word choices
-          // --------------------------------------------------------------
+        // --------------------------------------------------------------
+        // Drawer receives word choices
+        // --------------------------------------------------------------
 
-          if (data.type === "word_options") {
-            console.log("[Game] Word options received:", data)
+        if (data.type === "word_options") {
+          console.log("[Game] Word options received:", data)
 
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale word_options:",
-                data.round?.id
-              )
-
-              return
-            }
-
-            setWordOptions(data.words || [])
-            setGameError(null)
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale word_options:",
+              data.round?.id
+            )
 
             return
           }
 
-          // --------------------------------------------------------------
-          // Player ready
-          // --------------------------------------------------------------
+          setWordOptions(data.words || [])
+          setGameError(null)
 
-          if (data.type === "player_ready") {
-            console.log("[Game] Player ready:", data)
+          return
+        }
 
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale player_ready:",
-                data.round?.id
-              )
+        // --------------------------------------------------------------
+        // Player ready
+        // --------------------------------------------------------------
 
-              return
-            }
+        if (data.type === "player_ready") {
+          console.log("[Game] Player ready:", data)
 
-            setReadyPlayerIds(data.ready_player_ids || [])
-
-            if (data.player?.id === current_player?.id) {
-              setIsReady(true)
-            }
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale player_ready:",
+              data.round?.id
+            )
 
             return
           }
 
-          // --------------------------------------------------------------
-          // Live stroke started
-          // --------------------------------------------------------------
+          setReadyPlayerIds(data.ready_player_ids || [])
 
-          if (data.type === "stroke_started") {
-            if (isStaleRound(data.round?.id)) {
-              return
-            }
+          if (data.player?.id === current_player?.id) {
+            setIsReady(true)
+          }
 
-            const stroke = data.stroke
+          return
+        }
 
-            if (!stroke?.id) {
-              return
-            }
+        // --------------------------------------------------------------
+        // Live stroke started
+        // --------------------------------------------------------------
 
-            setLiveStrokes((current) => ({
-              ...current,
-              [stroke.id]: stroke,
-            }))
-
+        if (data.type === "stroke_started") {
+          if (isStaleRound(data.round?.id)) {
             return
           }
 
-          // --------------------------------------------------------------
-          // Live stroke points
-          // --------------------------------------------------------------
+          const stroke = data.stroke
 
-          if (data.type === "stroke_points") {
-            if (isStaleRound(data.round?.id)) {
-              return
-            }
+          if (!stroke?.id) {
+            return
+          }
 
-            const incoming = data.stroke
+          setLiveStrokes((current) => ({
+            ...current,
+            [stroke.id]: stroke,
+          }))
 
-            if (!incoming?.id) {
-              return
-            }
+          return
+        }
 
-            setLiveStrokes((current) => {
-              const existing = current[incoming.id]
+        // --------------------------------------------------------------
+        // Live stroke points
+        // --------------------------------------------------------------
 
-              if (!existing) {
-                return {
-                  ...current,
-                  [incoming.id]: incoming,
-                }
-              }
+        if (data.type === "stroke_points") {
+          if (isStaleRound(data.round?.id)) {
+            return
+          }
 
+          const incoming = data.stroke
+
+          if (!incoming?.id) {
+            return
+          }
+
+          setLiveStrokes((current) => {
+            const existing = current[incoming.id]
+
+            if (!existing) {
               return {
                 ...current,
-                [incoming.id]: {
-                  ...existing,
-                  points: [
-                    ...existing.points,
-                    ...(incoming.points || []),
-                  ],
-                },
+                [incoming.id]: incoming,
               }
-            })
-
-            return
-          }
-
-          // --------------------------------------------------------------
-          // Completed drawing stroke
-          // --------------------------------------------------------------
-
-          if (data.type === "stroke_drawn") {
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale stroke:",
-                data.round?.id
-              )
-
-              return
             }
 
-            const stroke = data.stroke
-            const roundId = data.round?.id
-
-            if (!stroke?.id) {
-              return
-            }
-
-            // Remove the temporary live version.
-            setLiveStrokes((current) => {
-              if (!current[stroke.id]) {
-                return current
-              }
-
-              const next = {
-                ...current,
-              }
-
-              delete next[stroke.id]
-
-              return next
-            })
-
-            const current = strokesRef.current
-
-            if (
-              current.some(
-                (existing) =>
-                  existing.id === stroke.id
-              )
-            ) {
-              return
-            }
-
-            const next = [
+            return {
               ...current,
-              stroke,
-            ]
+              [incoming.id]: {
+                ...existing,
+                points: [
+                  ...existing.points,
+                  ...(incoming.points || []),
+                ],
+              },
+            }
+          })
 
-            strokesRef.current = next
-            setStrokes(next)
+          return
+        }
 
-            // Preserve the drawing independently of the current UI round.
-            recordRoundStrokes(roundId, next)
+        // --------------------------------------------------------------
+        // Completed drawing stroke
+        // --------------------------------------------------------------
+
+        if (data.type === "stroke_drawn") {
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale stroke:",
+              data.round?.id
+            )
 
             return
           }
 
-          // --------------------------------------------------------------
-          // Stroke undone
-          // --------------------------------------------------------------
+          const stroke = data.stroke
+          const roundId = data.round?.id
 
-          if (data.type === "stroke_undone") {
-            console.log(
-              "[Drawing] STROKE UNDONE:",
-              data.stroke_id
-            )
+          if (!stroke?.id) {
+            return
+          }
 
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale stroke_undone:",
-                data.round?.id
-              )
-
-              return
+          setLiveStrokes((current) => {
+            if (!current[stroke.id]) {
+              return current
             }
 
-            if (!data.stroke_id) {
-              console.warn(
-                "[Drawing] stroke_undone missing stroke_id:",
-                data
-              )
-
-              return
+            const next = {
+              ...current,
             }
 
-            const current = strokesRef.current
+            delete next[stroke.id]
 
-            const next = current.filter(
-              (stroke) =>
-                stroke.id !== data.stroke_id
+            return next
+          })
+
+          const current = strokesRef.current
+
+          if (
+            current.some(
+              (existing) =>
+                existing.id === stroke.id
             )
+          ) {
+            return
+          }
 
-            console.log(
-              "[Drawing] Undo:",
-              current.length,
-              "→",
-              next.length
+          const next = [
+            ...current,
+            stroke,
+          ]
+
+          strokesRef.current = next
+          setStrokes(next)
+
+          recordRoundStrokes(roundId, next)
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Stroke undone
+        // --------------------------------------------------------------
+
+        if (data.type === "stroke_undone") {
+          console.log(
+            "[Drawing] STROKE UNDONE:",
+            data.stroke_id
+          )
+
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale stroke_undone:",
+              data.round?.id
             )
-
-            strokesRef.current = next
-            setStrokes(next)
-
-            recordRoundStrokes(
-              data.round?.id,
-              next
-            )
-
-            setLiveStrokes((current) => {
-              if (!current[data.stroke_id]) {
-                return current
-              }
-
-              const next = {
-                ...current,
-              }
-
-              delete next[data.stroke_id]
-
-              return next
-            })
 
             return
           }
 
+          if (!data.stroke_id) {
+            console.warn(
+              "[Drawing] stroke_undone missing stroke_id:",
+              data
+            )
 
+            return
+          }
 
-          // --------------------------------------------------------------
-          // Canvas cleared
-          // --------------------------------------------------------------
+          const current = strokesRef.current
 
-          if (data.type === "canvas_cleared") {
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale canvas_cleared:",
-                data.round?.id
-              )
+          const next = current.filter(
+            (stroke) =>
+              stroke.id !== data.stroke_id
+          )
 
-              return
+          console.log(
+            "[Drawing] Undo:",
+            current.length,
+            "→",
+            next.length
+          )
+
+          strokesRef.current = next
+          setStrokes(next)
+
+          recordRoundStrokes(
+            data.round?.id,
+            next
+          )
+
+          setLiveStrokes((current) => {
+            if (!current[data.stroke_id]) {
+              return current
             }
 
-            strokesRef.current = []
-            setStrokes([])
+            const next = {
+              ...current,
+            }
 
-            recordRoundStrokes(
-              data.round?.id,
-              []
+            delete next[data.stroke_id]
+
+            return next
+          })
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Canvas cleared
+        // --------------------------------------------------------------
+
+        if (data.type === "canvas_cleared") {
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale canvas_cleared:",
+              data.round?.id
             )
 
             return
           }
 
-          // --------------------------------------------------------------
-          // Game error
-          // --------------------------------------------------------------
+          strokesRef.current = []
+          setStrokes([])
 
-          if (data.type === "game_error") {
-            console.error(
-              "[Game] Error:",
-              data.message
-            )
+          recordRoundStrokes(
+            data.round?.id,
+            []
+          )
 
-            setGameError(data.message)
+          return
+        }
 
-            return
-          }
+        // --------------------------------------------------------------
+        // Game error
+        // --------------------------------------------------------------
 
-          // --------------------------------------------------------------
-          // Round ended
-          // --------------------------------------------------------------
+        if (data.type === "game_error") {
+          console.error(
+            "[Game] Error:",
+            data.message
+          )
 
-          if (data.type === "round_ended") {
+          setGameError(data.message)
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Round ended
+        // --------------------------------------------------------------
+
+        if (data.type === "round_ended") {
           console.log("[Game] Round ended:", data)
 
           const round = data.round
@@ -632,7 +650,6 @@ function recordRoundGuesses(roundId, nextGuesses) {
               (item) => item.id === completedRound.id
             )
 
-            // Update the existing round instead of duplicating it.
             if (existingIndex !== -1) {
               const next = [...current]
               next[existingIndex] = completedRound
@@ -684,101 +701,121 @@ function recordRoundGuesses(roundId, nextGuesses) {
           return
         }
 
-          if (data.type === "guess_submitted") {
-            console.log("[Game] Guess submitted:", data)
+        // --------------------------------------------------------------
+        // Guess submitted
+        // --------------------------------------------------------------
 
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale guess_submitted:",
-                data.round?.id
-              )
+        if (data.type === "guess_submitted") {
+          console.log("[Game] Guess submitted:", data)
 
-              return
-            }
-
-            const next = [
-              ...guessesRef.current,
-              data.guess,
-            ]
-
-            guessesRef.current = next
-            setGuesses(next)
-
-            recordRoundGuesses(
-              data.round?.id,
-              next
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale guess_submitted:",
+              data.round?.id
             )
 
             return
           }
 
-          if (data.type === "correct_guess") {
-            console.log("[Game] Correct guess:", data)
+          const next = [
+            ...guessesRef.current,
+            data.guess,
+          ]
 
-            if (isStaleRound(data.round?.id)) {
-              console.warn(
-                "[Game] Ignoring stale correct_guess:",
-                data.round?.id
-              )
+          guessesRef.current = next
+          setGuesses(next)
 
-              return
-            }
+          recordRoundGuesses(
+            data.round?.id,
+            next
+          )
 
-            setCorrectGuesser(data.player)
+          return
+        }
 
-            // The correct_guess event arrives before round_ended.
-            // Preserve the winner locally so the round-end UI can show it.
-            setRoundResult((current) => ({
-              ...(current || {}),
-              winner: data.player,
-            }))
+        // --------------------------------------------------------------
+        // Correct guess
+        // --------------------------------------------------------------
 
-            return
-          }
+        if (data.type === "correct_guess") {
+          console.log("[Game] Correct guess:", data)
 
-          if (data.type === "score_updated") {
-            console.log("[Game] Scores updated:", data.scores)
-
-            setPlayers((currentPlayers) =>
-              currentPlayers.map((player) => {
-                const score = data.scores.find(
-                  (item) => item.id === player.id
-                )
-
-                return score
-                  ? {
-                      ...player,
-                      score: score.score,
-                    }
-                  : player
-              })
+          if (isStaleRound(data.round?.id)) {
+            console.warn(
+              "[Game] Ignoring stale correct_guess:",
+              data.round?.id
             )
 
             return
           }
-          
-          if (data.type === "game_finished") {
-            console.log("[Game] Finished:", data)
 
-            setGameState("finished")
-            setFinalScores(data.scores || [])
-            setWordOptions([])
-            setTimeLeft(0)
+          setCorrectGuesser(data.player)
 
-            return
-          }
+          setRoundResult((current) => ({
+            ...(current || {}),
+            winner: data.player,
+          }))
 
-        },
-      }
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Score updated
+        // --------------------------------------------------------------
+
+        if (data.type === "score_updated") {
+          console.log(
+            "[Game] Scores updated:",
+            data.scores
+          )
+
+          setPlayers((currentPlayers) =>
+            currentPlayers.map((player) => {
+              const score = data.scores.find(
+                (item) => item.id === player.id
+              )
+
+              return score
+                ? {
+                    ...player,
+                    score: score.score,
+                  }
+                : player
+            })
+          )
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Game finished
+        // --------------------------------------------------------------
+
+        if (data.type === "game_finished") {
+          console.log("[Game] Finished:", data)
+
+          setGameState("finished")
+          setFinalScores(data.scores || [])
+          setWordOptions([])
+          setTimeLeft(0)
+
+          return
+        }
+      },
+    }
+  )
+
+  subscriptionRef.current = subscription
+
+  return () => {
+    console.log(
+      `[ActionCable] Unsubscribing from room ${game_room.code}`
     )
 
-    subscriptionRef.current = subscription
-
-    return () => {
-      subscription.unsubscribe()
-      subscriptionRef.current = null
-    }
-  }, [game_room.code])
+    subscription.unsubscribe()
+    subscriptionRef.current = null
+  }
+}, [game_room.code])
 
   
   // --------------------------------------------------------------------------

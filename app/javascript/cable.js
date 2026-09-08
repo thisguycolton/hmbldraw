@@ -1,5 +1,17 @@
-import { createConsumer } from "@rails/actioncable"
+import { createConsumer } from "@rails/actioncable";
 
-const cable = createConsumer()
+let consumer = null;
 
-export default cable
+export function getCableConsumer() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (!consumer) {
+    consumer = createConsumer();
+  }
+
+  return consumer;
+}
+
+export default getCableConsumer;
