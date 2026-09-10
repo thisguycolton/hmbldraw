@@ -1,6 +1,8 @@
 class Round < ApplicationRecord
   belongs_to :game_room
+
   has_many :round_readies, dependent: :destroy
+  has_many :guesses, dependent: :destroy
 
   belongs_to :drawer,
              class_name: "Player",
@@ -12,13 +14,20 @@ class Round < ApplicationRecord
              foreign_key: :winner_id,
              optional: true
 
-  has_many :guesses, dependent: :destroy
-  has_one :drawing, dependent: :destroy
-
-
-  STATUSES = %w[starting drawing ended].freeze
+  STATUSES = %w[
+    starting
+    drawing
+    ended
+  ].freeze
 
   validates :number,
+            presence: true,
+            numericality: {
+              only_integer: true,
+              greater_than: 0
+            }
+
+  validates :game_number,
             presence: true,
             numericality: {
               only_integer: true,
@@ -30,26 +39,23 @@ class Round < ApplicationRecord
             inclusion: { in: STATUSES }
 
   validates :word,
-          length: { minimum: 1 },
-          allow_blank: true
+            length: { minimum: 1 },
+            allow_blank: true
 
   validates :number,
-          uniqueness: {
-            scope: [:game_room_id, :game_number]
-          }
-  validates :game_number,
-    presence: true,
-    numericality: {
-      only_integer: true,
-      greater_than: 0
-    }
+            uniqueness: {
+              scope: [:game_room_id, :game_number]
+            }
 
   validate :drawer_belongs_to_game_room
   validate :winner_belongs_to_game_room
   validate :word_required_when_drawing
 
-  private
+  def game
+    game_room.games.find_by(number: game_number)
+  end
 
+  private
 
   def drawer_belongs_to_game_room
     return unless drawer
@@ -72,10 +78,14 @@ class Round < ApplicationRecord
       )
     end
   end
+
   def word_required_when_drawing
     return unless status == "drawing"
     return if word.present?
 
-    errors.add(:word, "can't be blank when drawing")
+    errors.add(
+      :word,
+      "can't be blank when drawing"
+    )
   end
 end

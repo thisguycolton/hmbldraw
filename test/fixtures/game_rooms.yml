@@ -6,8 +6,11 @@ one:
   current_round: 1
   total_rounds: 1
   round_duration: 1
-  started_at: 2026-09-06 19:31:50
-  finished_at: 2026-09-06 19:31:50
+  started_at: 2026-09-08 10:22:55
+  finished_at: 2026-09-08 10:22:55
+  game_number: 1
+  mode: MyString
+  name: MyString
 
 two:
   code: MyString
@@ -15,5 +18,8 @@ two:
   current_round: 1
   total_rounds: 1
   round_duration: 1
-  started_at: 2026-09-06 19:31:50
-  finished_at: 2026-09-06 19:31:50
+  started_at: 2026-09-08 10:22:55
+  finished_at: 2026-09-08 10:22:55
+  game_number: 1
+  mode: MyString
+  name: MyString

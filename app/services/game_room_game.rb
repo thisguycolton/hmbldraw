@@ -10,7 +10,15 @@ class GameRoomGame
     new(game_room, player).start!
   end
 
-    def self.draw_stroke!(game_room, player, stroke)
+  def self.leave_room!(game_room, player)
+    new(game_room, player).leave_room!
+  end
+
+  def self.leave_room!(game_room, player)
+    new(game_room, player).leave_room!
+  end
+
+  def self.draw_stroke!(game_room, player, stroke)
     new(game_room, player).draw_stroke!(stroke)
   end
 
@@ -47,38 +55,85 @@ class GameRoomGame
     @player = player
   end
 
+# --------------------------------------------------------------------------
+# Leave room
+# --------------------------------------------------------------------------
+
+def self.leave_room!(game_room, player)
+  new(game_room, player).leave_room!
+end
+
+def leave_room!
+  @game_room.with_lock do
+    @game_room.reload
+    @player = @game_room.players.find(@player.id)
+
+    raise Error, "You are not in this room." unless @player
+    raise Error, "You cannot leave once the game has started." unless @game_room.status == "waiting"
+
+    # Move the departing player out of the active position range before
+    # disconnecting them. This is important because Player validates the
+    # uniqueness of [game_room_id, position].
+    inactive_position = @game_room.players.maximum(:position).to_i + 1
+
+    @player.update_columns(
+      connected: false,
+      position: inactive_position,
+      last_seen_at: Time.current
+    )
+
+    # Re-number the remaining active players.
+    active_players = @game_room.players
+      .where(connected: true)
+      .order(:position, :id)
+      .to_a
+
+    # Temporarily move active players away from 0..N to avoid collisions
+    # with the unique (game_room_id, position) constraint.
+    active_players.each_with_index do |active_player, index|
+      active_player.update_columns(position: index + 1000)
+    end
+
+    # Now assign the real positions.
+    active_players.each_with_index do |active_player, index|
+      active_player.update_columns(position: index)
+    end
+
+    GameRoomBroadcaster.lobby_updated(@game_room)
+  end
+
+  true
+end
   # --------------------------------------------------------------------------
   # Start game
   # --------------------------------------------------------------------------
 
   def start!
-    round = nil
+  @game_room.with_lock do
+    @game_room.reload
+    @player = @game_room.players.find(@player.id)
 
-    @game_room.with_lock do
-      unless @player.game_room_id == @game_room.id
-        raise Error, "You are not a player in this room."
-      end
+    raise Error, "Game has already started" unless @game_room.status == "waiting"
+    raise Error, "Only the host can start the game" unless @player.position.zero?
+    raise Error, "At least 2 players are required" if @game_room.players.count < 2
 
-      unless @player.position == 0
-        raise Error, "Only the host can start the game."
-      end
+    game = @game_room.current_game
 
-      unless @game_room.status == "waiting"
-        raise Error, "The game has already started."
-      end
+    raise Error, "No game is available to start" unless game
+    raise Error, "Game has already started" unless game.status == "waiting"
 
-      players = @game_room.players.order(:position)
+    game.update!(
+      status: "active",
+      current_round: 0,
+      started_at: Time.current
+    )
 
-      if players.length < 2
-        raise Error, "At least 2 players are required to start."
-      end
+    round = create_next_round!(game)
 
-      round = create_next_round!
-    end
-
-    # --------------------------------------------------------------
-    # Tell everyone the game has started.
-    # --------------------------------------------------------------
+    @game_room.update!(
+      status: "starting_round",
+      current_round: round.number
+    )
 
     GameRoomBroadcaster.game_started(
       @game_room,
@@ -97,6 +152,7 @@ class GameRoomGame
 
     round
   end
+end
 
   # --------------------------------------------------------------------------
   # Choose word
@@ -126,14 +182,19 @@ def choose_word!(word)
       raise Error, "Only the drawer can choose the word."
     end
 
-    word = word.to_s.strip.downcase
+    submitted_word = word.to_s.strip
 
-    unless round.word_options.include?(word)
+    selected_word =
+      round.word_options.find do |option|
+        option.to_s.strip.casecmp?(submitted_word)
+      end
+
+    unless selected_word
       raise Error, "That word is not one of the available choices."
     end
 
     round.update!(
-      word: word
+      word: selected_word
     )
   end
 end
@@ -245,52 +306,48 @@ end
   # --------------------------------------------------------------------------
 
   def play_again!
-    round = nil
+  @game_room.with_lock do
+    @game_room.reload
+    @player = @game_room.players.find(@player.id)
 
-    @game_room.with_lock do
-      unless @player.game_room_id == @game_room.id
-        raise Error, "You are not a player in this room."
+    raise Error, "Only the host can start a new game" unless @player.position.zero?
+    raise Error, "Game is not finished" unless @game_room.status == "finished"
+
+    previous_game = @game_room.current_game
+
+    next_game_number =
+      if previous_game
+        previous_game.number + 1
+      else
+        @game_room.game_number + 1
       end
 
-      unless @player.position == 0
-        raise Error, "Only the host can start the game again."
-      end
-
-      unless @game_room.status == "finished"
-        raise Error, "The game is not finished."
-      end
-
-      # Reset scores.
-      @game_room.players.update_all(score: 0)
-
-      # Start a new game using the same rules.
-      @game_room.update!(
-        game_number: @game_room.game_number + 1,
-        current_round: 0
-      )
-
-      @game_room.reload
-
-      round = create_next_round!
-    end
-
-    GameRoomBroadcaster.game_started(
-      @game_room,
-      round
+    game = @game_room.games.create!(
+      number: next_game_number,
+      mode: @game_room.mode,
+      status: "waiting",
+      current_round: 0,
+      total_rounds: @game_room.total_rounds,
+      round_duration: @game_room.round_duration,
+      category: previous_game&.category,
+      difficulty: previous_game&.difficulty
     )
 
-    GameRoomBroadcaster.round_starting(
-      @game_room,
-      round
+    @game_room.players.update_all(score: 0)
+
+    @game_room.update!(
+      game_number: next_game_number,
+      current_round: 0,
+      status: "waiting",
+      started_at: nil,
+      finished_at: nil
     )
 
-    GameRoomBroadcaster.word_options(
-      round.drawer,
-      round
-    )
+    GameRoomBroadcaster.lobby_updated(@game_room)
 
-    round
+    game
   end
+end
 
   # --------------------------------------------------------------------------
   # Submit guess
@@ -370,7 +427,7 @@ end
   # End round
   # --------------------------------------------------------------------------
 
-  def end_round!(round, winner: nil)
+  def end_round!(round, winner: nil, reason: nil)
     ended_round = nil
     next_round = nil
     scores = nil
@@ -447,7 +504,10 @@ end
         round.started_at +
         @game_room.round_duration.seconds
 
-      unless winner || Time.current >= deadline
+      forced_end =
+        reason == :drawer_disconnected
+
+      unless winner || forced_end || Time.current >= deadline
         raise Error, "The round has not ended yet."
       end
 
@@ -500,9 +560,23 @@ end
       last_round =
         round.number >= @game_room.total_rounds
 
-      if last_round
+      connected_player_count =
+        @game_room.players.where(connected: true).count
+
+      cannot_continue =
+        connected_player_count < 2
+
+      if last_round || cannot_continue
+        game = @game_room.current_game
+
+        game.update!(
+          status: "finished",
+          finished_at: Time.current
+        )
+
         @game_room.update!(
-          status: "finished"
+          status: "finished",
+          finished_at: Time.current
         )
 
         game_finished = true
@@ -513,8 +587,11 @@ end
         # Players must become ready before it becomes "drawing".
         # --------------------------------------------------------------------
 
-        next_round = create_next_round!
+        game = @game_room.current_game
+
+        next_round = create_next_round!(game)
       end
+
 
       # ----------------------------------------------------------------------
       # Reload ended round for broadcast
@@ -597,155 +674,244 @@ end
   # Create next round
   # --------------------------------------------------------------------------
 
-  def create_next_round!
-    players =
-      @game_room
-        .players
-        .where(connected: true)
-        .order(:position)
+  def create_next_round!(game)
+  players =
+    @game_room
+      .players
+      .where(connected: true)
+      .order(:position)
 
-    if players.length < 2
-      raise Error, "At least 2 connected players are required."
-    end
+  raise Error, "At least 2 connected players are required" if players.count < 2
 
-    round_number =
-      @game_room.current_round + 1
+  next_round_number = game.current_round + 1
 
-    if round_number > @game_room.total_rounds
-      raise Error, "There are no more rounds to play."
-    end
+  if game.total_rounds.present? &&
+     next_round_number > game.total_rounds
+    raise Error, "No more rounds remain"
+  end
 
-    drawer_index =
-      (round_number - 1) % players.length
+  drawer =
+    players[
+      (next_round_number - 1) % players.length
+    ]
 
-    drawer =
-      players[drawer_index]
-
-    word_options =
-      Word
-        .order(Arel.sql("RANDOM()"))
-        .limit(3)
-        .to_a
-
-    if word_options.length < 3
-      raise Error, "Not enough words available."
-    end
-
-
-      round = @game_room.rounds.create!(
-        number: round_number,
-        game_number: @game_room.game_number,
-        drawer: drawer,
-        word: nil,
-        word_options: word_options.map(&:text),
-        strokes: [],
-        status: "starting"
-      )
-
-    @game_room.update!(
-      status: "starting_round",
-      current_round: round_number
+  words =
+    Word.random_for_category(
+      game.category,
+      3
     )
 
-    round
-  end
-  # --------------------------------------------------------------------------
-  # Current round
-  # --------------------------------------------------------------------------
+  raise Error, "Not enough words available" if words.length < 3
 
+  round =
+    @game_room.rounds.create!(
+      number: next_round_number,
+      game_number: game.number,
+      drawer: drawer,
+      word: nil,
+      word_options: words.map(&:text),
+      strokes: [],
+      status: "starting"
+    )
+
+  game.update!(
+    current_round: next_round_number
+  )
+
+  @game_room.update!(
+    current_round: next_round_number,
+    status: "starting_round"
+  )
+
+  round
+end
 
     # --------------------------------------------------------------------------
   # Drawing
   # --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Drawing
+# ------------------------------------------------------------------------------
 
-  def draw_stroke!(stroke)
-    round = nil
+def draw_stroke!(stroke)
+  round = nil
 
-    @game_room.with_lock do
-      round = current_round!
+  @game_room.with_lock do
+    round = current_round!
 
-      unless round.drawer_id == @player.id
-        raise Error, "Only the drawer can draw."
-      end
-
-      stroke = normalize_stroke(stroke)
-
-      if stroke["id"].blank?
-        raise Error, "Invalid stroke ID."
-      end
-
-      if stroke["points"].empty?
-        raise Error, "Invalid stroke points."
-      end
-
-      strokes = Array(round.strokes)
-
-      # ------------------------------------------------------------
-      # Idempotency:
-      # If the client retries the same completed stroke, don't
-      # duplicate it in the drawing.
-      # ------------------------------------------------------------
-
-      unless strokes.any? { |existing| existing["id"] == stroke["id"] }
-        strokes << stroke
-        round.update!(strokes: strokes)
-      end
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can draw."
     end
 
-    round
-  end
+    stroke = normalize_stroke(stroke)
 
-  def undo_stroke!(stroke_id)
-    round = nil
+    if stroke["id"].blank?
+      raise Error, "Invalid drawing operation ID."
+    end
 
-    @game_room.with_lock do
-      round = current_round!
+    strokes = Array(round.strokes)
 
-      unless round.drawer_id == @player.id
-        raise Error, "Only the drawer can undo strokes."
-      end
+    # --------------------------------------------------------------------------
+    # Idempotency
+    # --------------------------------------------------------------------------
 
-      strokes =
-        Array(round.strokes).reject do |stroke|
-          stroke["id"] == stroke_id.to_s
-        end
-
+    unless strokes.any? { |existing| existing["id"] == stroke["id"] }
+      strokes << stroke
       round.update!(strokes: strokes)
     end
-
-    round
   end
 
-  def clear_canvas!
-    round = nil
+  round
+end
 
-    @game_room.with_lock do
-      round = current_round!
+def undo_stroke!(stroke_id)
+  round = nil
 
-      unless round.drawer_id == @player.id
-        raise Error, "Only the drawer can clear the canvas."
-      end
+  @game_room.with_lock do
+    round = current_round!
 
-      round.update!(strokes: [])
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can undo strokes."
     end
 
-    round
+    strokes =
+      Array(round.strokes).reject do |stroke|
+        stroke["id"] == stroke_id.to_s
+      end
+
+    round.update!(strokes: strokes)
   end
 
-  private
+  round
+end
 
-  def normalize_stroke(stroke)
-    stroke = stroke.to_h.stringify_keys
+def clear_canvas!
+  round = nil
 
-    {
-      "id" => stroke["id"].to_s,
-      "points" => Array(stroke["points"]).map do |point|
-        Array(point).map(&:to_f)
-      end,
-      "color" => stroke["color"].to_s,
-      "width" => stroke["width"].to_f
+  @game_room.with_lock do
+    round = current_round!
+
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can clear the canvas."
+    end
+
+    round.update!(strokes: [])
+  end
+
+  round
+end
+
+private
+
+def normalize_stroke(stroke)
+  stroke =
+    stroke
+      .to_h
+      .stringify_keys
+
+  type =
+    stroke["type"].to_s
+
+  type = "stroke" if type.blank?
+
+  unless %w[stroke eraser fill].include?(type)
+    raise Error, "Invalid drawing operation."
+  end
+
+  id =
+    stroke["id"]
+      .to_s
+      .first(100)
+
+  raise Error, "Invalid drawing operation ID." if id.blank?
+
+  # --------------------------------------------------------------------------
+  # Bucket fill
+  # --------------------------------------------------------------------------
+
+  if type == "fill"
+    point =
+      Array(stroke["point"])
+
+    unless point.length == 2
+      raise Error, "Invalid fill point."
+    end
+
+    x = Float(point[0]) rescue nil
+    y = Float(point[1]) rescue nil
+
+    unless x && y
+      raise Error, "Invalid fill point."
+    end
+
+    color =
+      stroke["color"].to_s
+
+    color =
+      if color.match?(/\A#[0-9a-fA-F]{6}\z/)
+        color
+      else
+        "#18181b"
+      end
+
+    return {
+      "id" => id,
+      "type" => "fill",
+      "point" => [
+        x.clamp(0.0, 1.0),
+        y.clamp(0.0, 1.0)
+      ],
+      "color" => color
     }
   end
+
+  # --------------------------------------------------------------------------
+  # Stroke / eraser
+  # --------------------------------------------------------------------------
+
+  points =
+    Array(stroke["points"])
+      .first(5000)
+      .filter_map do |point|
+        next unless point.is_a?(Array)
+        next unless point.length == 2
+
+        x = Float(point[0]) rescue nil
+        y = Float(point[1]) rescue nil
+
+        next unless x && y
+
+        [
+          x.clamp(0.0, 1.0),
+          y.clamp(0.0, 1.0)
+        ]
+      end
+
+  raise Error, "Invalid stroke points." if points.empty?
+
+  width =
+    stroke["width"]
+      .to_f
+      .clamp(1.0, 30.0)
+
+  color =
+    stroke["color"].to_s
+
+  color =
+    if color.match?(/\A#[0-9a-fA-F]{6}\z/)
+      color
+    else
+      "#18181b"
+    end
+
+  {
+    "id" => id,
+    "type" => type,
+    "points" => points,
+    "color" => color,
+    "width" => width
+  }
+end
 
 
 def current_round!

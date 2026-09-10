@@ -4,6 +4,8 @@ class GameRoomChannel < ApplicationCable::Channel
   # --------------------------------------------------------------------------
 
   def subscribed
+    @explicitly_left = false
+
     @player = Player.find_by_player_token(
       params[:player_token]
     )
@@ -66,6 +68,50 @@ class GameRoomChannel < ApplicationCable::Channel
       }
     )
   end
+
+  # --------------------------------------------------------------------------
+# Leave room
+# --------------------------------------------------------------------------
+
+def leave_room(_data = {})
+  GameRoomGame.leave_room!(
+    @game_room,
+    @player
+  )
+
+  transmit(
+    {
+      type: "room_left"
+    }
+  )
+
+  @explicitly_left = true
+
+  stop_all_streams
+rescue GameRoomGame::Error => e
+  transmit(
+    {
+      type: "game_error",
+      message: e.message
+    }
+  )
+rescue StandardError => e
+  Rails.logger.error(
+    "[GameRoomChannel] leave_room failed: " \
+    "#{e.class}: #{e.message}"
+  )
+
+  Rails.logger.error(
+    e.backtrace.first(10).join("\n")
+  )
+
+  transmit(
+    {
+      type: "game_error",
+      message: "Unable to leave the room."
+    }
+  )
+end
 
   def set_ready
   GameRoomGame.set_ready!(@game_room, @player)
@@ -258,30 +304,37 @@ rescue StandardError => e
 end
 
 def draw_stroke(data)
-  # --------------------------------------------------------------
-  # Sanitize before passing data into the game service.
-  # --------------------------------------------------------------
-
   stroke = sanitize_stroke(data)
 
-  if stroke[:points].empty?
+  # --------------------------------------------------------------------------
+  # Validate operation-specific payload
+  # --------------------------------------------------------------------------
+
+  if stroke[:type] == "fill"
+    point = Array(stroke[:point])
+
+    unless point.length == 2
+      transmit(
+        {
+          type: "game_error",
+          message: "Invalid fill point."
+        }
+      )
+      return
+    end
+  elsif Array(stroke[:points]).empty?
     transmit(
       {
         type: "game_error",
         message: "Invalid stroke points."
       }
     )
-
     return
   end
 
-  # --------------------------------------------------------------
-  # Persist the completed stroke.
-  #
-  # draw_live is intentionally NOT persisted because it fires
-  # constantly while the drawer is moving the mouse/finger.
-  # This method represents the completed stroke.
-  # --------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # Persist the operation
+  # --------------------------------------------------------------------------
 
   round =
     GameRoomGame.draw_stroke!(
@@ -290,9 +343,9 @@ def draw_stroke(data)
       stroke
     )
 
-  # --------------------------------------------------------------
-  # Get the actual persisted stroke.
-  # --------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # Get the canonical persisted operation
+  # --------------------------------------------------------------------------
 
   saved_stroke =
     Array(round.strokes).find do |existing|
@@ -301,9 +354,9 @@ def draw_stroke(data)
 
   return unless saved_stroke
 
-  # --------------------------------------------------------------
-  # Tell everyone about the completed stroke.
-  # --------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # Broadcast to everyone in the room
+  # --------------------------------------------------------------------------
 
   ActionCable.server.broadcast(
     "game_room:#{@game_room.id}",
@@ -471,21 +524,54 @@ rescue StandardError => e
   )
 end
 
-  # --------------------------------------------------------------------------
-  # Disconnect
-  # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Disconnect
+# --------------------------------------------------------------------------
 
-  def unsubscribed
-    return unless @player && @connection_token
+def unsubscribed
+  return if @explicitly_left
+  return unless @player && @connection_token
 
-    @player.end_connection!(
-      @connection_token
+  player = @player
+  connection_token = @connection_token
+  game_room = @game_room
+
+  # Mark this specific connection as disconnected.
+  player.end_connection!(connection_token)
+
+  GameRoomBroadcaster.lobby_updated(game_room)
+
+  # ------------------------------------------------------------------------
+  # If this player was the active drawer, immediately end the round.
+  # ------------------------------------------------------------------------
+
+  game_room.reload
+
+  return unless game_room.status == "drawing"
+
+  round = game_room.rounds.find_by(
+    game_number: game_room.game_number,
+    number: game_room.current_round
+  )
+
+  return unless round&.status == "drawing"
+  return unless round.drawer_id == player.id
+
+  Rails.logger.info(
+    "[GameRoomChannel] Drawer disconnected; " \
+    "ending round immediately " \
+    "room=#{game_room.code} " \
+    "player=#{player.id} " \
+    "round=#{round.id}"
+  )
+
+  GameRoomGame
+    .new(game_room, player)
+    .end_round!(
+      round,
+      reason: :drawer_disconnected
     )
-
-    GameRoomBroadcaster.lobby_updated(
-      @game_room
-    )
-  end
+end
 
   private
 
@@ -565,6 +651,50 @@ def sync_current_game_state
     return
   end
 
+    # --------------------------------------------------------------------------
+    # Leave room
+    # --------------------------------------------------------------------------
+
+    def leave_room(_data = {})
+      @explicitly_left = true
+
+      GameRoomGame.leave_room!(
+        @game_room,
+        @player
+      )
+
+      transmit(
+        {
+          type: "room_left"
+        }
+      )
+
+      stop_all_streams
+    rescue GameRoomGame::Error => e
+      transmit(
+        {
+          type: "game_error",
+          message: e.message
+        }
+      )
+    rescue StandardError => e
+      Rails.logger.error(
+        "[GameRoomChannel] leave_room failed: " \
+        "#{e.class}: #{e.message}"
+      )
+
+      Rails.logger.error(
+        e.backtrace.first(10).join("\n")
+      )
+
+      transmit(
+        {
+          type: "game_error",
+          message: "Unable to leave the room."
+        }
+      )
+    end
+
   # --------------------------------------------------------------------------
   # Drawing phase
   # --------------------------------------------------------------------------
@@ -595,9 +725,62 @@ def sync_current_game_state
   # --------------------------------------------------------------------------
 
   if round.status == "ended"
+  transmit(
+    {
+      type: "round_ended",
+      game_room: {
+        id: @game_room.id,
+        code: @game_room.code,
+        status: @game_room.status,
+        current_round: @game_room.current_round,
+        total_rounds: @game_room.total_rounds,
+        round_duration: @game_room.round_duration
+      },
+      final: @game_room.status == "finished",
+      round: {
+        id: round.id,
+        number: round.number,
+        drawer: {
+          id: round.drawer.id,
+          name: round.drawer.name
+        },
+        winner:
+          if round.winner
+            {
+              id: round.winner.id,
+              name: round.winner.name
+            }
+          end,
+        word: round.word,
+        guesses:
+          round.guesses
+            .includes(:player)
+            .order(:created_at)
+            .map do |guess|
+              {
+                id: guess.id,
+                player: {
+                  id: guess.player.id,
+                  name: guess.player.name
+                },
+                text: guess.text,
+                correct: guess.correct
+              }
+            end,
+        ended_at: round.ended_at&.iso8601,
+        strokes: round.strokes
+      }
+    }
+  )
+
+  # ------------------------------------------------------------
+  # Finished game hydration
+  # ------------------------------------------------------------
+
+  if @game_room.status == "finished"
     transmit(
       {
-        type: "round_ended",
+        type: "game_finished",
         game_room: {
           id: @game_room.id,
           code: @game_room.code,
@@ -606,43 +789,20 @@ def sync_current_game_state
           total_rounds: @game_room.total_rounds,
           round_duration: @game_room.round_duration
         },
-        final: @game_room.status == "finished",
-        round: {
-          id: round.id,
-          number: round.number,
-          drawer: {
-            id: round.drawer.id,
-            name: round.drawer.name
-          },
-          winner:
-            if round.winner
-              {
-                id: round.winner.id,
-                name: round.winner.name
-              }
-            end,
-          word: round.word,
-          guesses:
-            round.guesses
-              .includes(:player)
-              .order(:created_at)
-              .map do |guess|
-                {
-                  id: guess.id,
-                  player: {
-                    id: guess.player.id,
-                    name: guess.player.name
-                  },
-                  text: guess.text,
-                  correct: guess.correct
-                }
-              end,
-          ended_at: round.ended_at&.iso8601,
-          strokes: round.strokes
-        }
+        scores: @game_room.players
+          .order(:position)
+          .map do |player|
+            {
+              id: player.id,
+              name: player.name,
+              score: player.score
+            }
+          end
       }
     )
   end
+end
+
 end
 
   # --------------------------------------------------------------------------
@@ -679,17 +839,30 @@ end
   round
 end
 
-  def sanitize_live_stroke(data)
+ def sanitize_live_stroke(data)
   type = data["type"].to_s
 
   unless %w[start points].include?(type)
-    raise GameRoomGame::Error, "Invalid live drawing event."
+    raise GameRoomGame::Error,
+          "Invalid live drawing event."
   end
 
   raw_stroke = data["stroke"]
 
   unless raw_stroke.is_a?(Hash)
-    raise GameRoomGame::Error, "Invalid live stroke."
+    raise GameRoomGame::Error,
+          "Invalid live stroke."
+  end
+
+  operation_type =
+    raw_stroke["type"].to_s
+
+  operation_type =
+    "stroke" if operation_type.blank?
+
+  unless %w[stroke eraser].include?(operation_type)
+    raise GameRoomGame::Error,
+          "Invalid live drawing operation."
   end
 
   points =
@@ -710,7 +883,8 @@ end
         ]
       end
 
-  color = raw_stroke["color"].to_s
+  color =
+    raw_stroke["color"].to_s
 
   color =
     if color.match?(/\A#[0-9a-fA-F]{6}\z/)
@@ -729,14 +903,17 @@ end
       .to_s
       .first(100)
 
-  raise GameRoomGame::Error, "Invalid stroke ID." if id.blank?
+  raise GameRoomGame::Error,
+        "Invalid stroke ID." if id.blank?
 
-  raise GameRoomGame::Error, "Invalid stroke points." if points.empty?
+  raise GameRoomGame::Error,
+        "Invalid stroke points." if points.empty?
 
   {
     type: type,
     stroke: {
       id: id,
+      type: operation_type,
       points: points,
       color: color,
       width: width
@@ -751,7 +928,74 @@ end
   # --------------------------------------------------------------------------
 
   def sanitize_stroke(data)
-    points = Array(data["points"])
+  data = data.to_h.stringify_keys
+
+  type =
+    data["type"].to_s
+
+  type = "stroke" if type.blank?
+
+  unless %w[stroke eraser fill].include?(type)
+    raise GameRoomGame::Error,
+          "Invalid drawing operation."
+  end
+
+  # --------------------------------------------------------------------------
+  # Fill
+  # --------------------------------------------------------------------------
+
+  if type == "fill"
+    point =
+      Array(data["point"])
+
+    unless point.length == 2
+      raise GameRoomGame::Error,
+            "Invalid fill point."
+    end
+
+    x = Float(point[0]) rescue nil
+    y = Float(point[1]) rescue nil
+
+    unless x && y
+      raise GameRoomGame::Error,
+            "Invalid fill point."
+    end
+
+    color =
+      data["color"].to_s
+
+    color =
+      if color.match?(/\A#[0-9a-fA-F]{6}\z/)
+        color
+      else
+        "#18181b"
+      end
+
+    id =
+      data["id"]
+        .to_s
+        .first(100)
+
+    raise GameRoomGame::Error,
+          "Invalid drawing operation ID." if id.blank?
+
+    return {
+      id: id,
+      type: "fill",
+      point: [
+        x.clamp(0.0, 1.0),
+        y.clamp(0.0, 1.0)
+      ],
+      color: color
+    }
+  end
+
+  # --------------------------------------------------------------------------
+  # Stroke / Eraser
+  # --------------------------------------------------------------------------
+
+  points =
+    Array(data["points"])
       .first(5000)
       .filter_map do |point|
         next unless point.is_a?(Array)
@@ -768,24 +1012,32 @@ end
         ]
       end
 
-    color = data["color"].to_s
+  color =
+    data["color"].to_s
 
-    color =
-      if color.match?(/\A#[0-9a-fA-F]{6}\z/)
-        color
-      else
-        "#18181b"
-      end
+  color =
+    if color.match?(/\A#[0-9a-fA-F]{6}\z/)
+      color
+    else
+      "#18181b"
+    end
 
-    width = data["width"].to_f.clamp(1.0, 30.0)
+  width =
+    data["width"]
+      .to_f
+      .clamp(1.0, 30.0)
 
-    id = data["id"].to_s.first(100)
+  id =
+    data["id"]
+      .to_s
+      .first(100)
 
-    {
-      id: id,
-      points: points,
-      color: color,
-      width: width
-    }
-  end
+  {
+    id: id,
+    type: type,
+    points: points,
+    color: color,
+    width: width
+  }
+end
 end

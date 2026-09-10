@@ -3,33 +3,46 @@ class GameRoomBroadcaster
   # Lobby
   # --------------------------------------------------------------------------
 
-  def self.lobby_updated(game_room)
-    game_room.reload
+# --------------------------------------------------------------------------
+# Lobby
+# --------------------------------------------------------------------------
 
-    ActionCable.server.broadcast(
-      "game_room:#{game_room.id}",
-      {
-        type: "lobby_updated",
-        game_room: {
-          id: game_room.id,
-          code: game_room.code,
-          status: game_room.status,
-          current_round: game_room.current_round,
-          total_rounds: game_room.total_rounds,
-          round_duration: game_room.round_duration
-        },
-        players: game_room.players.order(:position).map do |player|
-          {
-            id: player.id,
-            name: player.name,
-            score: player.score,
-            position: player.position,
-            connected: player.connected
-          }
-        end
-      }
-    )
-  end
+def self.lobby_updated(game_room)
+  game = game_room.current_game
+
+  ActionCable.server.broadcast("game_room:#{game_room.id}", {
+    type: "lobby_updated",
+
+    game_room: {
+      id: game_room.id,
+      code: game_room.code,
+      status: game_room.status,
+      current_round: game_room.current_round,
+      total_rounds: game_room.total_rounds,
+      round_duration: game_room.round_duration,
+
+      category: game&.category && {
+        id: game.category.id,
+        name: game.category.name,
+        slug: game.category.slug
+      },
+      difficulty: game&.difficulty
+    },
+
+    players: game_room.players
+      .where(connected: true)
+      .order(:position)
+      .map do |player|
+        {
+          id: player.id,
+          name: player.name,
+          score: player.score,
+          position: player.position,
+          connected: player.connected
+        }
+      end
+  })
+end
 
   # --------------------------------------------------------------------------
   # Game started
@@ -159,9 +172,23 @@ def self.stroke_points(game_room, round, stroke)
   )
 end
 
-  # --------------------------------------------------------------------------
-  # Round ended
-  # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Completed drawing operation
+# --------------------------------------------------------------------------
+
+def self.stroke_drawn(game_room, round, stroke)
+  ActionCable.server.broadcast(
+    "game_room:#{game_room.id}",
+    {
+      type: "stroke_drawn",
+      round: {
+        id: round.id,
+        number: round.number
+      },
+      stroke: stroke
+    }
+  )
+end
 
 # --------------------------------------------------------------------------
 # Round ended

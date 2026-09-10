@@ -1,5 +1,11 @@
+require "digest"
+
 class Player < ApplicationRecord
   belongs_to :game_room
+
+  has_many :game_players, dependent: :destroy
+  has_many :games, through: :game_players
+
   has_many :guesses, dependent: :destroy
   has_many :round_readies, dependent: :destroy
 
@@ -13,16 +19,31 @@ class Player < ApplicationRecord
            foreign_key: :winner_id,
            dependent: :nullify
 
-  validates :name, presence: true, length: { in: 1..24 }
-  validates :score, numericality: { greater_than_or_equal_to: 0 }
-  validates :position, numericality: {
-    only_integer: true,
-    greater_than_or_equal_to: 0
-  }
+  validates :name,
+            presence: true,
+            length: { in: 1..24 }
 
-  validates :game_room_id, uniqueness: { scope: :position }
+  validates :score,
+            numericality: {
+              greater_than_or_equal_to: 0
+            }
+
+  validates :position,
+            numericality: {
+              only_integer: true,
+              greater_than_or_equal_to: 0
+            }
+
+  validates :game_room_id,
+            uniqueness: {
+              scope: :position
+            }
 
   before_validation :normalize_name
+
+  # --------------------------------------------------------------------------
+  # Player authentication token
+  # --------------------------------------------------------------------------
 
   def generate_player_token!
     token = SecureRandom.urlsafe_base64(32)
@@ -42,12 +63,17 @@ class Player < ApplicationRecord
     find_by(player_token_digest: digest)
   end
 
+  # --------------------------------------------------------------------------
+  # ActionCable connection
+  # --------------------------------------------------------------------------
+
   def begin_connection!
     token = SecureRandom.urlsafe_base64(24)
 
     update!(
       connection_token: token,
-      connected: true
+      connected: true,
+      last_seen_at: Time.current
     )
 
     token
@@ -56,7 +82,10 @@ class Player < ApplicationRecord
   def end_connection!(token)
     return unless connection_token == token
 
-    update!(connected: false)
+    update!(
+      connected: false,
+      last_seen_at: Time.current
+    )
   end
 
   private

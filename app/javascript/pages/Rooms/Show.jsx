@@ -1,6 +1,19 @@
 import { Head } from "@inertiajs/react"
 import { useEffect, useRef, useState } from "react"
 import { getCableConsumer } from "../../cable"
+import {
+  PawPrint,
+  Utensils,
+  Box,
+  MapPin,
+  Trophy,
+  Sparkles,
+  Leaf,
+  Music,
+  Gamepad2,
+  HeartHandshake,
+  CircleHelp,
+} from "lucide-react"
 import GameCanvas from "../../components/GameCanvas"
 import RoundCarousel from "../../components/RoundCarousel"
 
@@ -8,6 +21,202 @@ import {
   getPlayerToken,
   setPlayerToken,
 } from "../../player_identity"
+
+const CATEGORY_ICONS = {
+  animals: PawPrint,
+  "food-drink": Utensils,
+  food: Utensils,
+  objects: Box,
+  places: MapPin,
+  sports: Trophy,
+  nature: Leaf,
+  music: Music,
+  games: Gamepad2,
+  sobriety: HeartHandshake,
+  random: Sparkles,
+}
+
+function CategoryIcon({ slug, className = "h-5 w-5" }) {
+  const Icon = CATEGORY_ICONS[slug] || CircleHelp
+
+  return (
+    <Icon
+      className={className}
+      strokeWidth={1.8}
+    />
+  )
+}
+
+function GameWorkspace({
+  children,
+  aside = null,
+  asideClassName = "",
+}) {
+  return (
+    <section className="mt-6 sm:mt-8">
+      <div
+        className={[
+          "grid items-start gap-4",
+          aside
+            ? "lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-6"
+            : "",
+        ].join(" ")}
+      >
+        <main className="min-w-0">
+          {children}
+        </main>
+
+        {aside && (
+          <aside
+            className={[
+              "min-w-0",
+              "lg:sticky lg:top-6",
+              asideClassName,
+            ].join(" ")}
+          >
+            {aside}
+          </aside>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function PreviousRoundResults({ round }) {
+  if (!round) {
+    return null
+  }
+
+  const guesses = round.guesses || []
+  const winner = round.winner
+  const drawer = round.drawer
+
+  return (
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 overflow-hidden">
+      <div className="px-5 py-5">
+        <div className="text-[11px] font-medium uppercase tracking-[0.24em] text-zinc-500">
+          Round {round.number} Results
+        </div>
+      </div>
+
+      <div className="border-t border-zinc-800">
+        {/* Drawing */}
+        <div className="p-4">
+          <div className="aspect-square w-full overflow-hidden rounded-xl bg-white">
+            <GameCanvas
+              roundId={round.id}
+              strokes={round.strokes || []}
+              canDraw={false}
+              onStroke={() => {}}
+              onLiveStroke={() => {}}
+              onUndo={() => {}}
+              onClear={() => {}}
+            />
+          </div>
+        </div>
+
+        {/* Word */}
+        <div className="px-5 pb-5">
+          <div className="rounded-xl bg-zinc-900 px-4 py-3 text-center">
+            <div className="text-[10px] font-medium uppercase tracking-[0.22em] text-zinc-500">
+              The word was
+            </div>
+
+            <div className="mt-1 text-lg font-semibold text-white capitalize">
+              {round.word || "—"}
+            </div>
+          </div>
+        </div>
+
+        {/* Drawer / Winner */}
+        <div className="border-t border-zinc-800 px-5 py-5 space-y-5">
+          <div>
+            <div className="text-xs text-zinc-500">
+              Drawer
+            </div>
+
+            <div className="mt-1 text-base font-semibold text-white">
+              {drawer?.name || "—"}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-zinc-500">
+              Winner
+            </div>
+
+            {winner ? (
+              <>
+                <div className="mt-1 text-base font-semibold text-emerald-400">
+                  {winner.name}
+                </div>
+
+                <div className="mt-0.5 text-xs text-zinc-500">
+                  Guessed it correctly!
+                </div>
+              </>
+            ) : (
+              <div className="mt-1 text-base font-semibold text-zinc-400">
+                Nobody
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Guesses */}
+        <div className="border-t border-zinc-800">
+          <div className="px-5 py-4">
+            <div className="text-sm font-medium text-zinc-300">
+              All Guesses ({guesses.length})
+            </div>
+          </div>
+
+          {guesses.length > 0 ? (
+            <div className="border-t border-zinc-800">
+              {guesses.map((guess, index) => {
+                const correct =
+                  guess.correct === true ||
+                  guess.correct === "true"
+
+                return (
+                  <div
+                    key={guess.id || `${guess.player?.id}-${index}`}
+                    className="flex items-center justify-between gap-4 px-5 py-4 border-b border-zinc-900 last:border-b-0"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-zinc-200">
+                        {guess.player?.name || guess.player_name || "Player"}
+                      </div>
+
+                      <div className="mt-0.5 truncate text-xs text-zinc-500">
+                        {guess.text}
+                      </div>
+                    </div>
+
+                    <div
+                      className={[
+                        "shrink-0 text-xs font-medium",
+                        correct
+                          ? "text-emerald-400"
+                          : "text-zinc-500",
+                      ].join(" ")}
+                    >
+                      {correct ? "Correct" : "Wrong"}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="border-t border-zinc-800 px-5 py-5 text-sm text-zinc-500">
+              No guesses.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function Show({
   game_room,
@@ -46,8 +255,18 @@ export default function Show({
 
 
   useEffect(() => {
-    currentRoundRef.current = currentRound
-  }, [currentRound])
+      currentRoundRef.current = currentRound
+    }, [currentRound])
+
+    function leaveRoom() {
+    if (!subscriptionRef.current) {
+      return
+    }
+
+    setGameError(null)
+
+    subscriptionRef.current.perform("leave_room")
+  }
 
   function isStaleRound(roundId) {
     const currentId = currentRoundRef.current?.id
@@ -109,7 +328,7 @@ function recordRoundGuesses(roundId, nextGuesses) {
   // --------------------------------------------------------------------------
 useEffect(() => {
   // ------------------------------------------------------------------------
-  // Action Cable is browser-only.
+  // ActionCable is browser-only.
   //
   // This component is rendered by Inertia SSR on the server, where
   // window/document/WebSocket do not exist.
@@ -184,11 +403,47 @@ useEffect(() => {
         // --------------------------------------------------------------
 
         if (data.type === "lobby_updated") {
-          setPlayers(data.players)
+          console.log("[Lobby] Updated:", data)
 
-          if (data.game_room.status === "waiting") {
-            setGameState("waiting")
-          }
+          setPlayers(data.players || [])
+
+          const incomingStatus = data.game_room?.status
+
+          setGameState((currentState) => {
+            // A lobby_updated broadcast can be triggered by another
+            // player's connection/disconnection. Those broadcasts can
+            // arrive after the game has already started.
+            //
+            // Never let a waiting broadcast regress an active game.
+            if (
+              incomingStatus === "waiting" &&
+              [
+                "starting_round",
+                "drawing",
+                "round_end",
+              ].includes(currentState)
+            ) {
+              console.log(
+                "[Lobby] Ignoring waiting update while game is active"
+              )
+
+              return currentState
+            }
+
+            if (incomingStatus) {
+              return incomingStatus
+            }
+
+            return currentState
+          })
+
+          return
+        }
+
+        if (data.type === "room_left") {
+          console.log("[Lobby] Left room")
+
+          window.location.href = "/"
 
           return
         }
@@ -208,8 +463,11 @@ useEffect(() => {
           roundGuessesRef.current = {}
           setCompletedRounds([])
 
-          setGameState(data.game_room.status)
           setCurrentRound(data.round)
+
+          // game_started is authoritative.
+          setGameState("starting_round")
+
           setGameError(null)
 
           return
@@ -346,7 +604,9 @@ useEffect(() => {
             return
           }
 
-          setWordOptions(data.words || [])
+          const words = data.words || []
+
+          setWordOptions(words)
           setGameError(null)
 
           return
@@ -504,11 +764,6 @@ useEffect(() => {
         // --------------------------------------------------------------
 
         if (data.type === "stroke_undone") {
-          console.log(
-            "[Drawing] STROKE UNDONE:",
-            data.stroke_id
-          )
-
           if (isStaleRound(data.round?.id)) {
             console.warn(
               "[Game] Ignoring stale stroke_undone:",
@@ -532,13 +787,6 @@ useEffect(() => {
           const next = current.filter(
             (stroke) =>
               stroke.id !== data.stroke_id
-          )
-
-          console.log(
-            "[Drawing] Undo:",
-            current.length,
-            "→",
-            next.length
           )
 
           strokesRef.current = next
@@ -624,6 +872,17 @@ useEffect(() => {
             return
           }
 
+          if (isStaleRound(round.id)) {
+            console.warn(
+              "[Game] Ignoring stale round_ended:",
+              round.id,
+              "current:",
+              currentRoundRef.current?.id
+            )
+
+            return
+          }
+
           const completedRound = {
             ...round,
             strokes: Array.isArray(round.strokes)
@@ -633,6 +892,7 @@ useEffect(() => {
               ? round.guesses
               : [],
           }
+
 
           console.log(
             "[Gallery] Completed round:",
@@ -664,7 +924,6 @@ useEffect(() => {
             )
           })
 
-          setCurrentRound(round)
 
           setRoundResult((current) => ({
             ...(current || {}),
@@ -677,6 +936,7 @@ useEffect(() => {
           }))
 
           setTimeLeft(0)
+
           setWordOptions([])
           setReadyPlayerIds([])
           setIsReady(false)
@@ -817,7 +1077,7 @@ useEffect(() => {
   }
 }, [game_room.code])
 
-  
+
   // --------------------------------------------------------------------------
 // Round countdown
 // --------------------------------------------------------------------------
@@ -981,18 +1241,7 @@ function undoStroke(strokeId) {
 }
 
 function sendLiveStroke(data) {
-  console.log(
-    "[Drawing] LIVE SEND:",
-    data.type,
-    data.stroke?.id,
-    data.stroke?.points?.length
-  )
-
   if (!subscriptionRef.current) {
-    console.warn(
-      "[Drawing] No Action Cable subscription"
-    )
-
     return
   }
 
@@ -1037,363 +1286,586 @@ function sendLiveStroke(data) {
     currentRound &&
     current_player.id === currentRound.drawer.id
 
-  const isHost =
-    current_player?.position === 0
+  const isHost = current_player?.position === 0
+
+  const previousRound =
+    completedRounds.length > 0
+      ? completedRounds[completedRounds.length - 1]
+      : null
 
   // --------------------------------------------------------------------------
   // Render
   // --------------------------------------------------------------------------
 
-  return (
-    <>
-      <Head title={`Room ${game_room.code}`} />
+return (
+  <>
+    <Head title={`Room ${game_room.code}`} />
 
-      <div className="min-h-screen bg-zinc-950 text-white">
-        <div className="mx-auto max-w-5xl px-6 py-10">
+    <div className="min-h-screen bg-zinc-950 text-white">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-10">
 
-          {/* ---------------------------------------------------------------- */}
-          {/* Header */}
-          {/* ---------------------------------------------------------------- */}
+        {/* ---------------------------------------------------------------- */}
+        {/* Header */}
+        {/* ---------------------------------------------------------------- */}
 
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="mb-2 text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
-                HMBLDRAW
-              </p>
+        <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="mb-2 text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
+              HMBLDRAW
+            </p>
 
-              <h1 className="text-4xl font-bold tracking-tight">
-                {gameState === "waiting"
-                  ? "Game Lobby"
-                  : "Game"}
-              </h1>
+            <h1 className="text-4xl font-bold tracking-tight">
+              {gameState === "waiting"
+                ? "Game Lobby"
+                : "Game"}
+            </h1>
 
-              <p className="mt-2 text-zinc-500">
-                {gameState === "waiting"
-                  ? players.length < 2
-                    ? "Waiting for another player to join..."
-                    : isHost
-                      ? "Ready to start the game."
-                      : "Waiting for the host to start the game."
-                  : gameState === "starting_round"
-                    ? "Getting ready..."
-                    : gameState === "drawing"
-                      ? isDrawer
-                        ? "Your turn to draw"
-                        : `${currentRound?.drawer?.name} is drawing`
-                      : "Game in progress"}
-              </p>
-            </div>
+            <p className="mt-2 text-zinc-500">
+              {gameState === "waiting"
+                ? players.length < 2
+                  ? "Waiting for another player to join..."
+                  : isHost
+                    ? "Ready to start the game."
+                    : "Waiting for the host to start the game."
+                : gameState === "starting_round"
+                  ? "Getting ready..."
+                  : gameState === "drawing"
+                    ? isDrawer
+                      ? "Your turn to draw"
+                      : `${currentRound?.drawer?.name} is drawing`
+                    : gameState === "round_end"
+                      ? "Round complete"
+                      : gameState === "finished"
+                        ? "Game complete"
+                        : "Game in progress"}
+            </p>
+            {game_room.category && (
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-400">
+                    <CategoryIcon
+                      slug={game_room.category.slug}
+                      className="h-3.5 w-3.5"
+                    />
 
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-6 py-4 text-center">
-              <p className="text-xs font-medium uppercase tracking-widest text-zinc-500">
-                Room Code
-              </p>
+                    {game_room.category.name}
+                  </span>
 
-              <p className="mt-1 font-mono text-3xl font-bold tracking-[0.25em]">
-                {game_room.code}
-              </p>
-            </div>
+                  <span className="text-zinc-700">·</span>
+
+                  <span className="text-xs text-zinc-500">
+                    {game_room.total_rounds} rounds
+                  </span>
+
+                  <span className="text-zinc-700">·</span>
+
+                  <span className="text-xs text-zinc-500">
+                    {game_room.round_duration}s drawing time
+                  </span>
+                </div>
+              )}
           </div>
 
-          {/* ---------------------------------------------------------------- */}
-          {/* Connection status */}
-          {/* ---------------------------------------------------------------- */}
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-6 py-4 text-center">
+            <p className="text-xs font-medium uppercase tracking-widest text-zinc-500">
+              Room Code
+            </p>
 
-          <div className="mt-8 flex items-center gap-2 text-sm">
-            <span
-              className={`h-2 w-2 rounded-full ${
-                connected
-                  ? "bg-emerald-400"
-                  : "bg-yellow-400"
-              }`}
-            />
-
-            <span className="text-zinc-500">
-              {connected
-                ? "Live connection"
-                : "Connecting..."}
-            </span>
+            <p className="mt-1 font-mono text-3xl font-bold tracking-[0.25em]">
+              {game_room.code}
+            </p>
           </div>
+        </header>
 
-          {/* ---------------------------------------------------------------- */}
-          {/* Errors */}
-          {/* ---------------------------------------------------------------- */}
+        {/* ---------------------------------------------------------------- */}
+        {/* Connection status */}
+        {/* ---------------------------------------------------------------- */}
 
-          {gameError && (
-            <div className="mt-6 rounded-xl border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
-              {gameError}
-            </div>
-          )}
+        <div className="mt-8 flex items-center gap-2 text-sm">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              connected
+                ? "bg-emerald-400"
+                : "bg-yellow-400"
+            }`}
+          />
 
-          {/* ---------------------------------------------------------------- */}
-          {/* Word selection */}
-          {/* ---------------------------------------------------------------- */}
+          <span className="text-zinc-500">
+            {connected
+              ? "Live connection"
+              : "Connecting..."}
+          </span>
+        </div>
 
-          {gameState === "starting_round" &&
-            wordOptions.length > 0 &&
-            currentRound &&
-            isDrawer && (
-              <section className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
-                <div className="mb-5">
-                  <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-500">
-                    Your Turn
-                  </p>
+        {/* ---------------------------------------------------------------- */}
+        {/* Errors */}
+        {/* ---------------------------------------------------------------- */}
 
-                  <h2 className="mt-2 text-2xl font-bold">
-                    Choose a word to draw
+        {gameError && (
+          <div className="mt-6 rounded-xl border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
+            {gameError}
+          </div>
+        )}
+
+        {/* ================================================================= */}
+        {/* LOBBY                                                              */}
+        {/* ================================================================= */}
+
+        {gameState === "waiting" && (
+          <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+
+            {/* Players */}
+
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">
+                    Players
                   </h2>
 
-                  <p className="mt-2 text-sm text-zinc-500">
-                    Pick one. Everyone else will see the
-                    drawing, but not the word.
+                  <p className="mt-1 text-sm text-zinc-500">
+                    {players.length} / 8 players
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                {players.map((player) => (
+                  <div
+                    key={player.id}
+                    className="flex items-center gap-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+                  >
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-sm font-bold">
+                      {player.name
+                        .charAt(0)
+                        .toUpperCase()}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate font-medium">
+                          {player.name}
+                        </p>
+
+                        {current_player?.id === player.id && (
+                          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-950">
+                            You
+                          </span>
+                        )}
+
+                        {player.position === 0 && (
+                          <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                            Host
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            player.connected
+                              ? "bg-emerald-400"
+                              : "bg-zinc-700"
+                          }`}
+                        />
+
+                        {player.connected
+                          ? "Connected"
+                          : "Disconnected"}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {Array.from({
+                  length: Math.max(
+                    0,
+                    8 - players.length
+                  ),
+                }).map((_, index) => (
+                  <div
+                    key={`empty-${index}`}
+                    className="flex items-center gap-4 rounded-xl border border-dashed border-zinc-800 p-4"
+                  >
+                    <div className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-zinc-800 text-zinc-700">
+                      +
+                    </div>
+
+                    <p className="text-sm text-zinc-600">
+                      Waiting for player...
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Settings */}
+
+
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+              <h2 className="text-lg font-semibold">
+                Game Settings
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Rules for this game.
+              </p>
+
+              <div className="mt-6 space-y-3">
+
+                {/* Category */}
+
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-zinc-300">
+                      <CategoryIcon
+                        slug={game_room.category?.slug}
+                        className="h-5 w-5"
+                      />
+                    </div>
+
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-600">
+                        Category
+                      </p>
+
+                      <p className="mt-1 truncate font-semibold">
+                        {game_room.category?.name || "Unknown"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Rounds */}
+
+                <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3">
+                  <span className="text-sm text-zinc-500">
+                    Rounds
+                  </span>
+
+                  <span className="font-medium">
+                    {game_room.total_rounds}
+                  </span>
+                </div>
+
+                {/* Drawing Time */}
+
+                <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3">
+                  <span className="text-sm text-zinc-500">
+                    Drawing time
+                  </span>
+
+                  <span className="font-medium">
+                    {game_room.round_duration}s
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={
+                  players.length < 2 ||
+                  gameState !== "waiting" ||
+                  !connected ||
+                  !isHost
+                }
+                onClick={startGame}
+                className="mt-8 w-full rounded-xl bg-white px-5 py-3 font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                {gameState !== "waiting"
+                  ? "Game Starting…"
+                  : players.length < 2
+                    ? "Waiting for Players"
+                    : !isHost
+                      ? "Waiting for Host"
+                      : "Start Game"}
+              </button>
+
+              <button
+                type="button"
+                onClick={leaveRoom}
+                disabled={!connected}
+                className="mt-3 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-5 py-3 font-semibold text-zinc-400 transition hover:border-zinc-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                Leave Room
+              </button>
+
+              {players.length < 2 && (
+                <p className="mt-3 text-center text-xs text-zinc-600">
+                  Need at least 2 players to start.
+                </p>
+              )}
+
+              {players.length >= 2 && !isHost && (
+                <p className="mt-3 text-center text-xs text-zinc-600">
+                  Waiting for the host to start.
+                </p>
+              )}
+            </section>
+          </div>
+        )}
+
+        {/* ================================================================= */}
+        {/* STARTING ROUND                                                     */}
+        {/* ================================================================= */}
+
+        {gameState === "starting_round" &&
+          currentRound && (
+
+              <GameWorkspace
+
+                aside={
+
+                  previousRound ? (
+
+                    <PreviousRoundResults round={previousRound} />
+
+                  ) : null
+
+                }
+
+              >
+
+              <section className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl">
+
+                {/* Header */}
+
+                <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
+                  <p className="text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
+                    Round {currentRound.number}
+                  </p>
+
+                  <h2 className="mt-3 text-3xl font-bold tracking-tight">
+                    {isDrawer
+                      ? selectedWord
+                        ? "You're ready to draw"
+                        : "Choose your word"
+                      : `${currentRound.drawer.name} is drawing`}
+                  </h2>
+
+                  <p className="mt-3 text-sm text-zinc-500">
+                    {isDrawer
+                      ? selectedWord
+                        ? "Press Ready when you're ready to begin."
+                        : "Choose a word, then press Ready."
+                      : "Get ready. The round will begin when everyone is ready."}
                   </p>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {wordOptions.map((word) => (
-                    <button
-                      key={word}
-                      type="button"
-                      onClick={() => chooseWord(word)}
-                      disabled={isReady}
-                      className="rounded-xl border border-zinc-700 bg-zinc-950 px-5 py-5 text-lg font-semibold capitalize transition hover:border-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {word}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
+                {/* Word choices */}
 
-            {/* ---------------------------------------------------------------- */}
-            {/* Ready phase */}
-            {/* ---------------------------------------------------------------- */}
-
-            {gameState === "starting_round" &&
-              currentRound && (
-                <section className="mt-8">
-                  <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl">
-
-                    <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
-                      <p className="text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
-                        Round {currentRound.number}
-                      </p>
-
-                      <h2 className="mt-3 text-3xl font-bold tracking-tight">
-                        {isDrawer
-                          ? selectedWord
-                            ? "You're ready to draw"
-                            : "Choose your word"
-                          : `${currentRound.drawer.name} is drawing`}
-                      </h2>
-
-                      <p className="mt-3 text-sm text-zinc-500">
-                        {isDrawer
-                          ? selectedWord
-                            ? "Press Ready when you're ready to begin."
-                            : "Choose a word, then press Ready."
-                          : "Get ready. The round will begin when everyone is ready."}
-                      </p>
-                    </div>
-
-                    {isDrawer && selectedWord && (
-                      <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
-                        <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
-                          Your Word
-                        </p>
-
-                        <div className="mt-4 inline-flex rounded-2xl border border-zinc-700 bg-zinc-950 px-8 py-4">
-                          <span className="text-3xl font-bold capitalize">
-                            {selectedWord}
-                          </span>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="px-6 py-6 sm:px-10">
+                {isDrawer &&
+                  wordOptions.length > 0 && (
+                    <div className="border-b border-zinc-800 px-6 py-6 sm:px-10">
                       <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
-                        Players
+                        Choose a word
                       </p>
 
-                      <div className="space-y-2">
-                        {players.map((player) => {
-                          const ready = readyPlayerIds.includes(player.id)
-
-                          return (
-                            <div
-                              key={player.id}
-                              className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3"
-                            >
-                              <div className="flex min-w-0 items-center gap-3">
-                                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-sm font-bold">
-                                  {player.name.charAt(0).toUpperCase()}
-                                </div>
-
-                                <div className="min-w-0">
-                                  <p className="truncate font-medium">
-                                    {player.name}
-                                  </p>
-
-                                  {player.id === current_player?.id && (
-                                    <p className="text-xs text-zinc-600">
-                                      You
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-
-                              <div
-                                className={`shrink-0 text-sm font-semibold ${
-                                  ready
-                                    ? "text-emerald-400"
-                                    : "text-zinc-600"
-                                }`}
-                              >
-                                {ready ? "✓ Ready" : "Not ready"}
-                              </div>
-                            </div>
-                          )
-                        })}
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        {wordOptions.map((word) => (
+                          <button
+                            key={word}
+                            type="button"
+                            onClick={() => chooseWord(word)}
+                            disabled={isReady}
+                            className="rounded-xl border border-zinc-700 bg-zinc-950 px-5 py-5 text-lg font-semibold capitalize transition hover:border-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {word}
+                          </button>
+                        ))}
                       </div>
                     </div>
+                  )}
 
-                    <div className="border-t border-zinc-800 px-6 py-6 sm:px-10">
-                      <button
-                        type="button"
-                        onClick={setReady}
-                        disabled={
-                          isReady ||
-                          !connected ||
-                          (isDrawer && !selectedWord)
-                        }
-                        className="w-full rounded-xl bg-white px-5 py-4 font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-                      >
-                        {isReady
-                          ? "✓ You're Ready"
-                          : isDrawer && !selectedWord
-                            ? "Choose a Word First"
-                            : "Ready"}
-                      </button>
-
-                      {isReady && (
-                        <p className="mt-3 text-center text-sm text-zinc-600">
-                          Waiting for the other players...
-                        </p>
-                      )}
-
-                      {isDrawer && !selectedWord && (
-                        <p className="mt-3 text-center text-xs text-zinc-600">
-                          You must choose a word before you can ready up.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </section>
-              )}
-
-          {/* ---------------------------------------------------------------- */}
-          {/* Drawing canvas */}
-          {/* ---------------------------------------------------------------- */}
-
-          {gameState === "drawing" &&
-            currentRound && (
-              <section className="mt-8">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-500">
-                      Round {currentRound.number}
-                    </p>
-
-                    <h2 className="mt-1 text-xl font-bold">
-                      {isDrawer
-                        ? "Your turn"
-                        : `${currentRound.drawer.name} is drawing`}
-                    </h2>
-                  </div>
-
-                  <div className="flex items-center gap-3">
-                    {timeLeft !== null && (
-                      <div
-                        className={`rounded-xl border px-5 py-2 text-center font-mono text-2xl font-bold ${
-                          timeLeft <= 10
-                            ? "border-red-500/50 bg-red-950/40 text-red-400"
-                            : "border-zinc-700 bg-zinc-900 text-white"
-                        }`}
-                      >
-                        {timeLeft}
-                      </div>
-                    )}
-
-                    {isDrawer &&
-                      timeLeft !== null &&
-                      timeLeft > 0 && (
-                        <button
-                        type="button"
-                        onClick={clearCanvas}
-                        className="rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                </div>
+                {/* Selected word */}
 
                 {isDrawer && selectedWord && (
-                  <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-center shadow-lg">
-                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
-                      Your word
-                    </div>
+                  <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
+                    <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
+                      Your Word
+                    </p>
 
-                    <div className="mt-1 text-2xl font-bold tracking-tight text-white uppercase">
-                      {selectedWord}
+                    <div className="mt-4 inline-flex rounded-2xl border border-zinc-700 bg-zinc-950 px-8 py-4">
+                      <span className="text-3xl font-bold capitalize">
+                        {selectedWord}
+                      </span>
                     </div>
                   </div>
                 )}
 
-                <GameCanvas
-                  roundId={currentRound?.id}
-                  strokes={[
-                    ...strokes,
-                    ...Object.values(liveStrokes),
-                  ]}
-                  canDraw={
-                    isDrawer &&
-                    timeLeft !== null &&
-                    timeLeft > 0
-                  }
-                  onStroke={drawStroke}
-                  onLiveStroke={sendLiveStroke}
-                  onUndo={undoStroke}
-                />
-                                {/* Drawer guess feed */}
-                {isDrawer && (
-                  <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+                {/* Players */}
+
+                <div className="px-6 py-6 sm:px-10">
+                  <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
+                    Players
+                  </p>
+
+                  <div className="space-y-2">
+                    {players.map((player) => {
+                      const ready =
+                        readyPlayerIds.includes(
+                          player.id
+                        )
+
+                      return (
+                        <div
+                          key={player.id}
+                          className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3"
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-sm font-bold">
+                              {player.name
+                                .charAt(0)
+                                .toUpperCase()}
+                            </div>
+
+                            <div className="min-w-0">
+                              <p className="truncate font-medium">
+                                {player.name}
+                              </p>
+
+                              {player.id ===
+                                current_player?.id && (
+                                <p className="text-xs text-zinc-600">
+                                  You
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div
+                            className={`shrink-0 text-sm font-semibold ${
+                              ready
+                                ? "text-emerald-400"
+                                : "text-zinc-600"
+                            }`}
+                          >
+                            {ready
+                              ? "✓ Ready"
+                              : "Not ready"}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Ready button */}
+
+                <div className="border-t border-zinc-800 px-6 py-6 sm:px-10">
+                  <button
+                    type="button"
+                    onClick={setReady}
+                    disabled={
+                      isReady ||
+                      !connected ||
+                      (isDrawer && !selectedWord)
+                    }
+                    className="w-full rounded-xl bg-white px-5 py-4 font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    {isReady
+                      ? "✓ You're Ready"
+                      : isDrawer && !selectedWord
+                        ? "Choose a Word First"
+                        : "Ready"}
+                  </button>
+
+                  {isReady && (
+                    <p className="mt-3 text-center text-sm text-zinc-600">
+                      Waiting for the other players...
+                    </p>
+                  )}
+
+                  {isDrawer && !selectedWord && (
+                    <p className="mt-3 text-center text-xs text-zinc-600">
+                      You must choose a word before you can ready up.
+                    </p>
+                  )}
+                </div>
+              </section>
+
+            </GameWorkspace>
+          )}
+
+        {/* ================================================================= */}
+        {/* DRAWING                                                           */}
+        {/* ================================================================= */}
+
+        {gameState === "drawing" &&
+          currentRound && (
+            <GameWorkspace
+              aside={
+                <>
+                  {/* Round controls */}
+
+                  <div className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
+                          Round
+                        </p>
+
+                        <p className="mt-1 font-semibold">
+                          {currentRound.number}
+                        </p>
+                      </div>
+
+                      {isDrawer && (
+                        <button
+                          type="button"
+                          onClick={clearCanvas}
+                          disabled={
+                            timeLeft === null ||
+                            timeLeft <= 0 ||
+                            strokes.length === 0
+                          }
+                          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Guesses */}
+
+                  <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+
                     <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
                       <div>
                         <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
                           Guesses
                         </p>
 
-                        <p className="mt-1 text-xs text-zinc-600">
-                          See what everyone is thinking
-                        </p>
+                        {isDrawer && (
+                          <p className="mt-1 text-xs text-zinc-600">
+                            See what everyone is thinking
+                          </p>
+                        )}
                       </div>
 
                       <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-500">
-                        {guesses.filter((guess) => !guess.correct).length}
+                        {
+                          guesses.filter(
+                            (guess) => !guess.correct
+                          ).length
+                        }
                       </span>
                     </div>
 
-                    {guesses.filter((guess) => !guess.correct).length > 0 ? (
-                      <div className="max-h-48 overflow-y-auto">
-                        {guesses
-                          .filter((guess) => !guess.correct)
+                    <div className="max-h-72 overflow-y-auto">
+                      {guesses.filter(
+                        (guess) => !guess.correct
+                      ).length > 0 ? (
+                        guesses
+                          .filter(
+                            (guess) => !guess.correct
+                          )
                           .slice()
                           .reverse()
                           .map((guess) => (
                             <div
                               key={guess.id}
-                              className="flex items-center justify-between gap-4 border-b border-zinc-800/60 px-4 py-3 last:border-0"
+                              className="flex items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-3 last:border-0"
                             >
                               <div className="flex min-w-0 items-center gap-3">
                                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-xs font-bold">
@@ -1413,475 +1885,388 @@ function sendLiveStroke(data) {
                                 </div>
                               </div>
 
-                              <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-zinc-700">
-                                Wrong
-                              </span>
+                              {isDrawer && (
+                                <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-zinc-700">
+                                  Wrong
+                                </span>
+                              )}
                             </div>
-                          ))}
-                      </div>
-                    ) : (
-                      <div className="px-4 py-6 text-center">
-                        <p className="text-sm text-zinc-600">
-                          No guesses yet.
-                        </p>
+                          ))
+                      ) : (
+                        <div className="px-4 py-8 text-center">
+                          <p className="text-sm text-zinc-600">
+                            No guesses yet.
+                          </p>
 
-                        <p className="mt-1 text-xs text-zinc-700">
-                          The guesses will appear here as players play.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Player guess input */}
-                {!isDrawer && timeLeft !== null && timeLeft > 0 && (
-                  <div className="mt-6">
-                    <form
-                      onSubmit={submitGuess}
-                      className="flex gap-3"
-                    >
-                      <input
-                        type="text"
-                        value={guessText}
-                        onChange={(event) =>
-                          setGuessText(event.target.value)
-                        }
-                        maxLength={100}
-                        placeholder="What is being drawn?"
-                        className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-white outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
-                      />
-
-                      <button
-                        type="submit"
-                        disabled={!guessText.trim()}
-                        className="rounded-xl bg-white px-5 py-3 font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-                      >
-                        Guess
-                      </button>
-                    </form>
-                  </div>
-                )}
-              </section>
-            )}
-
-            {(gameState === "round_end" || gameState === "starting_round") &&
-  roundResult && (
-    <section className="mt-8">
-      <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl">
-
-        {/* Header */}
-        <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
-          <p className="text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
-            Round {roundResult.number}
-          </p>
-
-          <h2 className="mt-3 text-4xl font-bold tracking-tight">
-            Round Over
-          </h2>
-
-          <p className="mt-3 text-zinc-500">
-            The word was
-          </p>
-
-          <div className="mt-4 inline-flex rounded-2xl border border-zinc-700 bg-zinc-950 px-8 py-4">
-            <span className="text-3xl font-bold capitalize">
-              {roundResult.word}
-            </span>
-          </div>
-        </div>
-
-        {/* Round summary */}
-        <div className="grid gap-4 border-b border-zinc-800 px-6 py-6 sm:grid-cols-2 sm:px-10">
-
-          {/* Drawer */}
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
-              Drawer
-            </p>
-
-            <p className="mt-2 text-lg font-semibold">
-              {roundResult.drawer.name}
-            </p>
-          </div>
-
-          {/* Winner */}
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
-              Winner
-            </p>
-
-            {roundResult.winner ? (
-              <>
-                <p className="mt-2 text-xl font-bold text-emerald-400">
-                  {roundResult.winner.name}
-                </p>
-
-                <p className="mt-1 text-sm text-zinc-500">
-                  Guessed it correctly!
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="mt-2 text-lg font-semibold text-zinc-600">
-                  Nobody
-                </p>
-
-                <p className="mt-1 text-sm text-zinc-700">
-                  Time ran out.
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Scoring */}
-        {roundResult.winner && (
-          <div className="border-b border-zinc-800 px-6 py-6 sm:px-10">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
-                <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
-                  Correct Guess
-                </p>
-
-                <p className="mt-2 text-lg font-semibold">
-                  {roundResult.winner.name}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
-                <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
-                  Round Complete
-                </p>
-
-                <p className="mt-2 text-lg font-semibold">
-                  Scores updated
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Drawing */}
-        {Array.isArray(roundResult.strokes) &&
-          roundResult.strokes.length > 0 && (
-          <div className="border-b border-zinc-800 px-6 pb-8 pt-6 sm:px-10">
-            <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
-              Drawing
-            </p>
-
-            <GameCanvas
-              strokes={roundResult.strokes}
-              canDraw={false}
-              onStroke={() => {}}
-            />
-          </div>
-        )}
-
-        {/* Guesses */}
-        {roundResult.guesses &&
-          roundResult.guesses.length > 0 && (
-            <div className="border-b border-zinc-800 px-6 py-6 sm:px-10">
-              <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
-                Guesses
-              </p>
-
-              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
-                {roundResult.guesses.map(
-                  (guess) => (
-                    <div
-                      key={guess.id}
-                      className={`flex items-center justify-between gap-4 border-b border-zinc-800/60 px-4 py-3 last:border-0 ${
-                        guess.correct
-                          ? "bg-emerald-950/20"
-                          : ""
-                      }`}
-                    >
-                      <div className="flex min-w-0 items-center gap-3">
-                        <span className="shrink-0 font-medium">
-                          {guess.player.name}
-                        </span>
-
-                        <span className="truncate text-zinc-500">
-                          {guess.text}
-                        </span>
-                      </div>
-
-                      {guess.correct && (
-                        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-emerald-400">
-                          Correct
-                        </span>
+                          {isDrawer && (
+                            <p className="mt-1 text-xs text-zinc-700">
+                              Guesses will appear here.
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )
+
+                    {!isDrawer &&
+                      timeLeft !== null &&
+                      timeLeft > 0 && (
+                        <div className="border-t border-zinc-800 p-3">
+                          <form
+                            onSubmit={submitGuess}
+                            className="flex gap-2"
+                          >
+                            <input
+                              type="text"
+                              value={guessText}
+                              onChange={(event) =>
+                                setGuessText(
+                                  event.target.value
+                                )
+                              }
+                              maxLength={100}
+                              placeholder="What is it?"
+                              className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
+                            />
+
+                            <button
+                              type="submit"
+                              disabled={!guessText.trim()}
+                              className="shrink-0 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+                            >
+                              Guess
+                            </button>
+                          </form>
+                        </div>
+                      )}
+
+                  </div>
+                </>
+              }
+            >
+
+              {/* Canvas header */}
+
+              <div className="mb-3 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-500">
+                    Round {currentRound.number}
+                  </p>
+
+                  <h2 className="mt-1 truncate text-xl font-bold">
+                    {isDrawer
+                      ? "Your turn"
+                      : `${currentRound.drawer.name} is drawing`}
+                  </h2>
+                </div>
+
+                {timeLeft !== null && (
+                  <div
+                    className={`shrink-0 rounded-xl border px-4 py-2 text-center font-mono text-xl font-bold sm:px-5 sm:text-2xl ${
+                      timeLeft <= 10
+                        ? "border-red-500/50 bg-red-950/40 text-red-400"
+                        : "border-zinc-700 bg-zinc-900 text-white"
+                    }`}
+                  >
+                    {timeLeft}
+                  </div>
                 )}
               </div>
-            </div>
+
+              {/* Drawer word */}
+
+              {isDrawer && selectedWord && (
+                <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-center shadow-lg">
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
+                    Your word
+                  </div>
+
+                  <div className="mt-1 text-2xl font-bold tracking-tight text-white uppercase">
+                    {selectedWord}
+                  </div>
+                </div>
+              )}
+
+              {/* Square drawing surface */}
+
+              <div className="aspect-square w-full overflow-hidden rounded-2xl border border-zinc-800 bg-white">
+                <GameCanvas
+                  roundId={currentRound.id}
+                  strokes={[
+                    ...strokes,
+                    ...Object.values(liveStrokes),
+                  ]}
+                  canDraw={
+                    isDrawer &&
+                    timeLeft !== null &&
+                    timeLeft > 0
+                  }
+                  onStroke={drawStroke}
+                  onLiveStroke={sendLiveStroke}
+                  onUndo={undoStroke}
+                  onClear={clearCanvas}
+                />
+              </div>
+
+            </GameWorkspace>
           )}
 
-        {/* Footer */}
-        <div className="px-6 py-5 text-center sm:px-10">
-          <p className="text-sm text-zinc-600">
-            Waiting for the next round...
+        {/* ================================================================= */}
+        {/* ROUND END                                                         */}
+        {/* ================================================================= */}
+
+        {gameState === "round_end" &&
+          roundResult && (
+            <section className="mt-8">
+              <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl">
+
+                {/* Header */}
+
+                <div className="border-b border-zinc-800 px-6 py-8 text-center sm:px-10">
+                  <p className="text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
+                    Round {roundResult.number}
+                  </p>
+
+                  <h2 className="mt-3 text-4xl font-bold tracking-tight">
+                    Round Over
+                  </h2>
+
+                  <p className="mt-3 text-zinc-500">
+                    The word was
+                  </p>
+
+                  <div className="mt-4 inline-flex rounded-2xl border border-zinc-700 bg-zinc-950 px-8 py-4">
+                    <span className="text-3xl font-bold capitalize">
+                      {roundResult.word}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Summary */}
+
+                <div className="grid gap-4 border-b border-zinc-800 px-6 py-6 sm:grid-cols-2 sm:px-10">
+
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
+                      Drawer
+                    </p>
+
+                    <p className="mt-2 text-lg font-semibold">
+                      {roundResult.drawer.name}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-600">
+                      Winner
+                    </p>
+
+                    {roundResult.winner ? (
+                      <>
+                        <p className="mt-2 text-xl font-bold text-emerald-400">
+                          {roundResult.winner.name}
+                        </p>
+
+                        <p className="mt-1 text-sm text-zinc-500">
+                          Guessed it correctly!
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="mt-2 text-lg font-semibold text-zinc-600">
+                          Nobody
+                        </p>
+
+                        <p className="mt-1 text-sm text-zinc-700">
+                          Time ran out.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Drawing */}
+
+                {Array.isArray(roundResult.strokes) &&
+                  roundResult.strokes.length > 0 && (
+                    <div className="border-b border-zinc-800 px-6 py-6 sm:px-10">
+                      <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
+                        Drawing
+                      </p>
+
+                      <div className="aspect-square w-full overflow-hidden rounded-2xl border border-zinc-800 bg-white">
+                        <GameCanvas
+                          strokes={roundResult.strokes}
+                          canDraw={false}
+                          onStroke={() => {}}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                {/* Guesses */}
+
+                {roundResult.guesses &&
+                  roundResult.guesses.length > 0 && (
+                    <div className="border-b border-zinc-800 px-6 py-6 sm:px-10">
+                      <p className="mb-4 text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
+                        Guesses
+                      </p>
+
+                      <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+                        {roundResult.guesses.map(
+                          (guess) => (
+                            <div
+                              key={guess.id}
+                              className={`flex items-center justify-between gap-4 border-b border-zinc-800/60 px-4 py-3 last:border-0 ${
+                                guess.correct
+                                  ? "bg-emerald-950/20"
+                                  : ""
+                              }`}
+                            >
+                              <div className="flex min-w-0 items-center gap-3">
+                                <span className="shrink-0 font-medium">
+                                  {guess.player.name}
+                                </span>
+
+                                <span className="truncate text-zinc-500">
+                                  {guess.text}
+                                </span>
+                              </div>
+
+                              {guess.correct && (
+                                <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-emerald-400">
+                                  Correct
+                                </span>
+                              )}
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                {/* Footer */}
+
+                <div className="px-6 py-5 text-center sm:px-10">
+                  <p className="text-sm text-zinc-600">
+                    Waiting for the next round...
+                  </p>
+                </div>
+
+              </div>
+            </section>
+          )}
+
+        {/* ================================================================= */}
+        {/* FINISHED                                                          */}
+        {/* ================================================================= */}
+
+        {gameState === "finished" && (
+  <section className="mt-6 sm:mt-8">
+    <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
+      {/* ================================================================
+          GAME GALLERY
+          ================================================================ */}
+      <section className="min-w-0">
+        <div className="mb-4">
+          <div className="text-[11px] font-medium uppercase tracking-[0.24em] text-zinc-500">
+            Game Gallery
+          </div>
+          <h2 className="mt-1 text-xl font-semibold text-white">
+            Every round
+          </h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            See how the game unfolded.
           </p>
         </div>
 
-      </div>
-    </section>
-  )}
+        <div className="space-y-4">
+          {completedRounds.map((round) => (
+            <PreviousRoundResults
+              key={round.id}
+              round={round}
+            />
+          ))}
+        </div>
+      </section>
 
-{gameState === "finished" && (
-  <section className="mt-8 space-y-6">
-
-    {/* ------------------------------------------------------------------ */}
-    {/* Final Scores */}
-    {/* ------------------------------------------------------------------ */}
-
-    <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl">
-
-      <div className="border-b border-zinc-800 px-6 py-10 text-center sm:px-10">
-        <p className="text-xs font-medium uppercase tracking-[0.3em] text-zinc-500">
-          Game Complete
-        </p>
-
-        <h2 className="mt-3 text-4xl font-bold tracking-tight">
-          Final Scores
-        </h2>
-      </div>
-
-      <div className="px-4 py-6 sm:px-8 sm:py-8">
-
-        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
-          {finalScores
-            .slice()
-            .sort((a, b) => b.score - a.score)
-            .map((player, index) => (
-              <div
-                key={player.id}
-                className="flex items-center justify-between gap-4 border-b border-zinc-800/60 px-4 py-4 last:border-0 sm:px-5"
-              >
-                <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-                  <span className="w-6 shrink-0 text-center text-sm font-bold text-zinc-600 sm:w-8">
-                    {index + 1}
-                  </span>
-
-                  <span className="truncate font-semibold">
-                    {player.name}
-                  </span>
+      {/* ================================================================
+          GAME COMPLETE
+          ================================================================ */}
+          <section className="min-w-0 lg:sticky lg:top-6">
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 overflow-hidden">
+              <div className="px-6 py-7 text-center">
+                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-zinc-900 text-zinc-300">
+                  <Trophy className="h-7 w-7" strokeWidth={1.8} />
                 </div>
 
-                <span className="shrink-0 text-lg font-bold">
-                  {player.score}
-                </span>
+                <div className="mt-5 text-[11px] font-medium uppercase tracking-[0.24em] text-zinc-500">
+                  Game Complete
+                </div>
+
+                <h2 className="mt-2 text-2xl font-semibold text-white">
+                  Final Scores
+                </h2>
+
+                <p className="mt-2 text-sm text-zinc-500">
+                  Great game. Here’s how everyone finished.
+                </p>
               </div>
-            ))}
+
+              <div className="border-t border-zinc-800">
+                {finalScores.length > 0 ? (
+                  <div>
+                    {finalScores.map((player, index) => (
+                      <div
+                        key={player.id}
+                        className="flex items-center gap-4 border-b border-zinc-900 px-5 py-4 last:border-b-0"
+                      >
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-zinc-400">
+                          {index + 1}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-semibold text-white">
+                            {player.name}
+                          </div>
+                        </div>
+
+                        <div className="shrink-0 text-lg font-semibold text-white">
+                          {player.score}
+                        </div>
+
+                        <div className="text-xs text-zinc-600">
+                          pts
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-5 py-8 text-center text-sm text-zinc-500">
+                    No scores available.
+                  </div>
+                )}
+              </div>
+
+              {isHost && (
+                <div className="border-t border-zinc-800 p-5">
+                  <button
+                    type="button"
+                    onClick={playAgain}
+                    className="w-full rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-200"
+                  >
+                    Play Again
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
         </div>
-
-        {finalScores.length > 0 && (
-          <div className="mt-8 text-center">
-            <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-600">
-              Winner
-            </p>
-
-            <p className="mt-2 text-2xl font-bold">
-              {
-                finalScores
-                  .slice()
-                  .sort((a, b) => b.score - a.score)[0]
-                  .name
-              }
-            </p>
-          </div>
-        )}
+      </section>
+    )}
 
       </div>
     </div>
-
-
-    {/* ------------------------------------------------------------------ */}
-    {/* Game Gallery */}
-    {/* ------------------------------------------------------------------ */}
-
-    <RoundCarousel rounds={completedRounds} />
-
-
-    {/* ------------------------------------------------------------------ */}
-    {/* Play Again */}
-    {/* ------------------------------------------------------------------ */}
-
-    {isHost && (
-      <div>
-        <button
-          type="button"
-          onClick={playAgain}
-          disabled={!connected}
-          className="w-full rounded-xl bg-emerald-300 px-5 py-4 font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-30"
-        >
-          Play Again
-        </button>
-      </div>
-    )}
-
-  </section>
-)}
-          {/* ---------------------------------------------------------------- */}
-          {/* Lobby / players */}
-          {/* ---------------------------------------------------------------- */}
-
-          {gameState === "waiting" && (
-            <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_320px]">
-
-              {/* Players */}
-
-              <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold">
-                      Players
-                    </h2>
-
-                    <p className="mt-1 text-sm text-zinc-500">
-                      {players.length} / 8 players
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                  {players.map((player) => (
-                    <div
-                      key={player.id}
-                      className="flex items-center gap-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4"
-                    >
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-sm font-bold">
-                        {player.name
-                          .charAt(0)
-                          .toUpperCase()}
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="truncate font-medium">
-                            {player.name}
-                          </p>
-
-                          {current_player?.id ===
-                            player.id && (
-                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-950">
-                              You
-                            </span>
-                          )}
-
-                          {player.position === 0 && (
-                            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
-                              Host
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="mt-1 flex items-center gap-2 text-xs text-zinc-600">
-                          <span
-                            className={`h-1.5 w-1.5 rounded-full ${
-                              player.connected
-                                ? "bg-emerald-400"
-                                : "bg-zinc-700"
-                            }`}
-                          />
-
-                          {player.connected
-                            ? "Connected"
-                            : "Disconnected"}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-
-                  {Array.from({
-                    length: Math.max(
-                      0,
-                      8 - players.length
-                    ),
-                  }).map((_, index) => (
-                    <div
-                      key={`empty-${index}`}
-                      className="flex items-center gap-4 rounded-xl border border-dashed border-zinc-800 p-4"
-                    >
-                      <div className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-zinc-800 text-zinc-700">
-                        +
-                      </div>
-
-                      <p className="text-sm text-zinc-600">
-                        Waiting for player...
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              {/* Settings */}
-
-              <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
-                <h2 className="text-lg font-semibold">
-                  Game Settings
-                </h2>
-
-                <div className="mt-6 space-y-4">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
-                    <span className="text-sm text-zinc-500">
-                      Rounds
-                    </span>
-
-                    <span className="font-medium">
-                      {game_room.total_rounds}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-zinc-500">
-                      Drawing time
-                    </span>
-
-                    <span className="font-medium">
-                      {game_room.round_duration}s
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={
-                    players.length < 2 ||
-                    gameState !== "waiting" ||
-                    !connected ||
-                    !isHost
-                  }
-                  onClick={startGame}
-                  className="mt-8 w-full rounded-xl bg-white px-5 py-3 font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  {gameState !== "waiting"
-                    ? "Game Starting…"
-                    : players.length < 2
-                      ? "Waiting for Players"
-                      : !isHost
-                        ? "Waiting for Host"
-                        : "Start Game"}
-                </button>
-
-                {players.length < 2 && (
-                  <p className="mt-3 text-center text-xs text-zinc-600">
-                    Need at least 2 players to start.
-                  </p>
-                )}
-
-                {players.length >= 2 &&
-                  !isHost && (
-                    <p className="mt-3 text-center text-xs text-zinc-600">
-                      Waiting for the host to start.
-                    </p>
-                  )}
-              </section>
-            </div>
-          )}
-        </div>
-      </div>
-    </>
-  )
+  </>
+)
 }

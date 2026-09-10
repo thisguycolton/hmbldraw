@@ -7,271 +7,729 @@
 # #   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
 # #     MovieGenre.find_or_create_by!(name: genre_name)
 # #   end
-# # db/seeds.rb
+# db/seeds.rb
 
-words = [
-  # Animals — Easy
-  { text: "cat", category: "Animals", difficulty: "easy" },
-  { text: "dog", category: "Animals", difficulty: "easy" },
-  { text: "fish", category: "Animals", difficulty: "easy" },
-  { text: "bird", category: "Animals", difficulty: "easy" },
-  { text: "horse", category: "Animals", difficulty: "easy" },
-  { text: "cow", category: "Animals", difficulty: "easy" },
-  { text: "pig", category: "Animals", difficulty: "easy" },
-  { text: "duck", category: "Animals", difficulty: "easy" },
-  { text: "frog", category: "Animals", difficulty: "easy" },
-  { text: "mouse", category: "Animals", difficulty: "easy" },
+# ============================================================================
+# HUMBLDRAW SEEDS
+# ============================================================================
+#
+# Difficulty:
+#   1 = Easy
+#   2 = Medium
+#   3 = Hard
+#
+# Difficulty is based primarily on how easy the word is to communicate
+# visually in a Pictionary-style game.
+# ============================================================================
 
-  # Animals — Medium
-  { text: "elephant", category: "Animals", difficulty: "medium" },
-  { text: "giraffe", category: "Animals", difficulty: "medium" },
-  { text: "penguin", category: "Animals", difficulty: "medium" },
-  { text: "kangaroo", category: "Animals", difficulty: "medium" },
-  { text: "monkey", category: "Animals", difficulty: "medium" },
-  { text: "crocodile", category: "Animals", difficulty: "medium" },
-  { text: "dolphin", category: "Animals", difficulty: "medium" },
-  { text: "octopus", category: "Animals", difficulty: "medium" },
-  { text: "butterfly", category: "Animals", difficulty: "medium" },
-  { text: "turtle", category: "Animals", difficulty: "medium" },
-
-  # Animals — Hard
-  { text: "platypus", category: "Animals", difficulty: "hard" },
-  { text: "chameleon", category: "Animals", difficulty: "hard" },
-  { text: "flamingo", category: "Animals", difficulty: "hard" },
-  { text: "porcupine", category: "Animals", difficulty: "hard" },
-  { text: "seahorse", category: "Animals", difficulty: "hard" },
-
-  # Food — Easy
-  { text: "pizza", category: "Food", difficulty: "easy" },
-  { text: "hamburger", category: "Food", difficulty: "easy" },
-  { text: "apple", category: "Food", difficulty: "easy" },
-  { text: "banana", category: "Food", difficulty: "easy" },
-  { text: "cake", category: "Food", difficulty: "easy" },
-  { text: "cookie", category: "Food", difficulty: "easy" },
-  { text: "ice cream", category: "Food", difficulty: "easy" },
-  { text: "hot dog", category: "Food", difficulty: "easy" },
-  { text: "sandwich", category: "Food", difficulty: "easy" },
-  { text: "popcorn", category: "Food", difficulty: "easy" },
-
-  # Food — Medium
-  { text: "spaghetti", category: "Food", difficulty: "medium" },
-  { text: "taco", category: "Food", difficulty: "medium" },
-  { text: "pancakes", category: "Food", difficulty: "medium" },
-  { text: "sushi", category: "Food", difficulty: "medium" },
-  { text: "watermelon", category: "Food", difficulty: "medium" },
-  { text: "birthday cake", category: "Food", difficulty: "medium" },
-  { text: "ice cream cone", category: "Food", difficulty: "medium" },
-  { text: "french fries", category: "Food", difficulty: "medium" },
-  { text: "cupcake", category: "Food", difficulty: "medium" },
-  { text: "cheeseburger", category: "Food", difficulty: "medium" },
-
-  # Objects — Easy
-  { text: "chair", category: "Objects", difficulty: "easy" },
-  { text: "table", category: "Objects", difficulty: "easy" },
-  { text: "book", category: "Objects", difficulty: "easy" },
-  { text: "pencil", category: "Objects", difficulty: "easy" },
-  { text: "phone", category: "Objects", difficulty: "easy" },
-  { text: "key", category: "Objects", difficulty: "easy" },
-  { text: "ball", category: "Objects", difficulty: "easy" },
-  { text: "door", category: "Objects", difficulty: "easy" },
-  { text: "clock", category: "Objects", difficulty: "easy" },
-  { text: "lamp", category: "Objects", difficulty: "easy" },
-
-  # Objects — Medium
-  { text: "umbrella", category: "Objects", difficulty: "medium" },
-  { text: "toaster", category: "Objects", difficulty: "medium" },
-  { text: "backpack", category: "Objects", difficulty: "medium" },
-  { text: "bicycle", category: "Objects", difficulty: "medium" },
-  { text: "camera", category: "Objects", difficulty: "medium" },
-  { text: "television", category: "Objects", difficulty: "medium" },
-  { text: "refrigerator", category: "Objects", difficulty: "medium" },
-  { text: "vacuum cleaner", category: "Objects", difficulty: "medium" },
-  { text: "skateboard", category: "Objects", difficulty: "medium" },
-  { text: "suitcase", category: "Objects", difficulty: "medium" },
-
-  # Objects — Hard
-  { text: "telescope", category: "Objects", difficulty: "hard" },
-  { text: "typewriter", category: "Objects", difficulty: "hard" },
-  { text: "hourglass", category: "Objects", difficulty: "hard" },
-  { text: "compass", category: "Objects", difficulty: "hard" },
-  { text: "microscope", category: "Objects", difficulty: "hard" },
-
-  # Places — Easy
-  { text: "house", category: "Places", difficulty: "easy" },
-  { text: "school", category: "Places", difficulty: "easy" },
-  { text: "park", category: "Places", difficulty: "easy" },
-  { text: "beach", category: "Places", difficulty: "easy" },
-  { text: "store", category: "Places", difficulty: "easy" },
-  { text: "hospital", category: "Places", difficulty: "easy" },
-  { text: "restaurant", category: "Places", difficulty: "easy" },
-  { text: "library", category: "Places", difficulty: "easy" },
-  { text: "airport", category: "Places", difficulty: "easy" },
-  { text: "farm", category: "Places", difficulty: "easy" },
-
-  # Places — Medium
-  { text: "castle", category: "Places", difficulty: "medium" },
-  { text: "lighthouse", category: "Places", difficulty: "medium" },
-  { text: "campground", category: "Places", difficulty: "medium" },
-  { text: "fire station", category: "Places", difficulty: "medium" },
-  { text: "movie theater", category: "Places", difficulty: "medium" },
-  { text: "gas station", category: "Places", difficulty: "medium" },
-  { text: "train station", category: "Places", difficulty: "medium" },
-  { text: "amusement park", category: "Places", difficulty: "medium" },
-  { text: "grocery store", category: "Places", difficulty: "medium" },
-  { text: "coffee shop", category: "Places", difficulty: "medium" },
-
-  # Nature — Easy
-  { text: "sun", category: "Nature", difficulty: "easy" },
-  { text: "moon", category: "Nature", difficulty: "easy" },
-  { text: "star", category: "Nature", difficulty: "easy" },
-  { text: "cloud", category: "Nature", difficulty: "easy" },
-  { text: "tree", category: "Nature", difficulty: "easy" },
-  { text: "flower", category: "Nature", difficulty: "easy" },
-  { text: "mountain", category: "Nature", difficulty: "easy" },
-  { text: "river", category: "Nature", difficulty: "easy" },
-  { text: "rain", category: "Nature", difficulty: "easy" },
-  { text: "snow", category: "Nature", difficulty: "easy" },
-
-  # Nature — Medium
-  { text: "volcano", category: "Nature", difficulty: "medium" },
-  { text: "waterfall", category: "Nature", difficulty: "medium" },
-  { text: "rainbow", category: "Nature", difficulty: "medium" },
-  { text: "tornado", category: "Nature", difficulty: "medium" },
-  { text: "desert", category: "Nature", difficulty: "medium" },
-  { text: "island", category: "Nature", difficulty: "medium" },
-  { text: "forest", category: "Nature", difficulty: "medium" },
-  { text: "cactus", category: "Nature", difficulty: "medium" },
-  { text: "lightning", category: "Nature", difficulty: "medium" },
-  { text: "campfire", category: "Nature", difficulty: "medium" },
-
-  # Actions — Easy
-  { text: "running", category: "Actions", difficulty: "easy" },
-  { text: "walking", category: "Actions", difficulty: "easy" },
-  { text: "jumping", category: "Actions", difficulty: "easy" },
-  { text: "sleeping", category: "Actions", difficulty: "easy" },
-  { text: "eating", category: "Actions", difficulty: "easy" },
-  { text: "drinking", category: "Actions", difficulty: "easy" },
-  { text: "dancing", category: "Actions", difficulty: "easy" },
-  { text: "swimming", category: "Actions", difficulty: "easy" },
-  { text: "singing", category: "Actions", difficulty: "easy" },
-  { text: "crying", category: "Actions", difficulty: "easy" },
-
-  # Actions — Medium
-  { text: "cooking", category: "Actions", difficulty: "medium" },
-  { text: "fishing", category: "Actions", difficulty: "medium" },
-  { text: "skiing", category: "Actions", difficulty: "medium" },
-  { text: "surfing", category: "Actions", difficulty: "medium" },
-  { text: "painting", category: "Actions", difficulty: "medium" },
-  { text: "gardening", category: "Actions", difficulty: "medium" },
-  { text: "photographing", category: "Actions", difficulty: "medium" },
-  { text: "shoveling", category: "Actions", difficulty: "medium" },
-  { text: "climbing", category: "Actions", difficulty: "medium" },
-  { text: "juggling", category: "Actions", difficulty: "medium" },
-
-  # Professions — Medium
-  { text: "doctor", category: "Professions", difficulty: "medium" },
-  { text: "firefighter", category: "Professions", difficulty: "medium" },
-  { text: "police officer", category: "Professions", difficulty: "medium" },
-  { text: "chef", category: "Professions", difficulty: "medium" },
-  { text: "teacher", category: "Professions", difficulty: "medium" },
-  { text: "pilot", category: "Professions", difficulty: "medium" },
-  { text: "astronaut", category: "Professions", difficulty: "medium" },
-  { text: "detective", category: "Professions", difficulty: "medium" },
-  { text: "construction worker", category: "Professions", difficulty: "medium" },
-  { text: "photographer", category: "Professions", difficulty: "medium" },
-
-  # Transportation — Easy
-  { text: "car", category: "Transportation", difficulty: "easy" },
-  { text: "bus", category: "Transportation", difficulty: "easy" },
-  { text: "train", category: "Transportation", difficulty: "easy" },
-  { text: "boat", category: "Transportation", difficulty: "easy" },
-  { text: "airplane", category: "Transportation", difficulty: "easy" },
-  { text: "truck", category: "Transportation", difficulty: "easy" },
-  { text: "bike", category: "Transportation", difficulty: "easy" },
-  { text: "rocket", category: "Transportation", difficulty: "easy" },
-  { text: "taxi", category: "Transportation", difficulty: "easy" },
-  { text: "helicopter", category: "Transportation", difficulty: "easy" },
-
-  # Transportation — Medium
-  { text: "submarine", category: "Transportation", difficulty: "medium" },
-  { text: "motorcycle", category: "Transportation", difficulty: "medium" },
-  { text: "sailboat", category: "Transportation", difficulty: "medium" },
-  { text: "hot air balloon", category: "Transportation", difficulty: "medium" },
-  { text: "roller skates", category: "Transportation", difficulty: "medium" },
-
-  # Sports — Easy
-  { text: "football", category: "Sports", difficulty: "easy" },
-  { text: "basketball", category: "Sports", difficulty: "easy" },
-  { text: "baseball", category: "Sports", difficulty: "easy" },
-  { text: "soccer", category: "Sports", difficulty: "easy" },
-  { text: "tennis", category: "Sports", difficulty: "easy" },
-  { text: "golf", category: "Sports", difficulty: "easy" },
-  { text: "bowling", category: "Sports", difficulty: "easy" },
-  { text: "skateboarding", category: "Sports", difficulty: "easy" },
-  { text: "boxing", category: "Sports", difficulty: "easy" },
-  { text: "skiing", category: "Sports", difficulty: "easy" },
-
-  # Sports — Medium
-  { text: "surfing", category: "Sports", difficulty: "medium" },
-  { text: "ice skating", category: "Sports", difficulty: "medium" },
-  { text: "rock climbing", category: "Sports", difficulty: "medium" },
-  { text: "horse racing", category: "Sports", difficulty: "medium" },
-  { text: "archery", category: "Sports", difficulty: "medium" },
-
-  # Fantasy / Fun — Medium
-  { text: "dragon", category: "Fantasy", difficulty: "medium" },
-  { text: "unicorn", category: "Fantasy", difficulty: "medium" },
-  { text: "mermaid", category: "Fantasy", difficulty: "medium" },
-  { text: "pirate", category: "Fantasy", difficulty: "medium" },
-  { text: "wizard", category: "Fantasy", difficulty: "medium" },
-  { text: "ghost", category: "Fantasy", difficulty: "medium" },
-  { text: "robot", category: "Fantasy", difficulty: "medium" },
-  { text: "alien", category: "Fantasy", difficulty: "medium" },
-  { text: "superhero", category: "Fantasy", difficulty: "medium" },
-  { text: "monster", category: "Fantasy", difficulty: "medium" },
-
-  # Fantasy / Fun — Hard
-  { text: "time machine", category: "Fantasy", difficulty: "hard" },
-  { text: "invisible man", category: "Fantasy", difficulty: "hard" },
-  { text: "magic carpet", category: "Fantasy", difficulty: "hard" },
-  { text: "haunted house", category: "Fantasy", difficulty: "hard" },
-  { text: "treasure map", category: "Fantasy", difficulty: "hard" }
+CATEGORY_DEFINITIONS = [
+  {
+    name: "Animals",
+    slug: "animals",
+    description: "Animals, insects, and creatures."
+  },
+  {
+    name: "Food & Drink",
+    slug: "food-drink",
+    description: "Food, meals, snacks, desserts, and drinks."
+  },
+  {
+    name: "Objects",
+    slug: "objects",
+    description: "Everyday objects, tools, and things."
+  },
+  {
+    name: "Places",
+    slug: "places",
+    description: "Buildings, landmarks, locations, and places."
+  },
+  {
+    name: "Sports",
+    slug: "sports",
+    description: "Sports, equipment, and sporting activities."
+  },
+  {
+    name: "Nature",
+    slug: "nature",
+    description: "Plants, weather, landscapes, and natural things."
+  },
+  {
+    name: "Music",
+    slug: "music",
+    description: "Musical instruments, music concepts, and performers."
+  },
+  {
+    name: "Games",
+    slug: "games",
+    description: "Games, toys, and gaming concepts."
+  },
+  {
+    name: "Sobriety",
+    slug: "sobriety",
+    description: "Recovery, sobriety, and the journey of living one day at a time."
+  },
+  {
+    name: "Random",
+    slug: "random",
+    description: "A random mix of words from the standard categories."
+  }
 ]
 
-words.each do |word|
-  Word.find_or_create_by!(text: word[:text]) do |record|
-    record.category = word[:category]
-    record.difficulty = word[:difficulty]
+CATEGORY_DEFINITIONS.each_with_index do |definition, index|
+  Category.find_or_initialize_by(slug: definition[:slug]).tap do |category|
+    category.name = definition[:name]
+    category.description = definition[:description]
+    category.position = index
+    category.active = true
+    category.save!
   end
 end
 
-puts "Seeded #{Word.count} words."
+def seed_words(category_slug, easy:, medium:, hard:)
+  category = Category.find_by!(slug: category_slug)
 
-# --------------------------------------------------------------------------
-# Demo Game Room
-# --------------------------------------------------------------------------
+  words = [
+    *easy.map { |text| [text, 1] },
+    *medium.map { |text| [text, 2] },
+    *hard.map { |text| [text, 3] }
+  ]
 
-demo_room = GameRoom.find_or_create_by!(code: "DEMO") do |room|
-  room.status = "waiting"
-  room.current_round = 0
-  room.total_rounds = 5
-  room.round_duration = 60
-end
-
-demo_players = [
-  { name: "Colton", position: 0 },
-  { name: "Alex",   position: 1 },
-  { name: "Sam",    position: 2 },
-  { name: "Jess",   position: 3 }
-]
-
-demo_players.each do |player|
-  demo_room.players.find_or_create_by!(position: player[:position]) do |record|
-    record.name = player[:name]
-    record.score = 0
-    record.connected = true
+  words.each do |text, difficulty|
+    Word.find_or_initialize_by(
+      category: category,
+      text: text
+    ).tap do |word|
+      word.difficulty = difficulty
+      word.active = true
+      word.save!
+    end
   end
+
+  puts "#{category.name}: #{words.length} words"
 end
 
-puts "Demo room: #{demo_room.code}"
-puts "Players: #{demo_room.players.order(:position).pluck(:name).join(', ')}"
+
+# ============================================================================
+# ANIMALS
+# ============================================================================
+
+seed_words(
+  "animals",
+
+  easy: [
+    "Cat",
+    "Dog",
+    "Fish",
+    "Bird",
+    "Horse",
+    "Cow",
+    "Pig",
+    "Duck",
+    "Frog",
+    "Mouse",
+    "Rabbit",
+    "Snake",
+    "Turtle",
+    "Shark",
+    "Whale",
+    "Lion",
+    "Tiger",
+    "Bear",
+    "Monkey",
+    "Elephant"
+  ],
+
+  medium: [
+    "Giraffe",
+    "Zebra",
+    "Penguin",
+    "Dolphin",
+    "Octopus",
+    "Crocodile",
+    "Kangaroo",
+    "Gorilla",
+    "Panda",
+    "Flamingo",
+    "Owl",
+    "Eagle",
+    "Parrot",
+    "Peacock",
+    "Hedgehog",
+    "Squirrel",
+    "Raccoon",
+    "Skunk",
+    "Deer",
+    "Fox"
+  ],
+
+  hard: [
+    "Chameleon",
+    "Jellyfish",
+    "Seahorse",
+    "Platypus",
+    "Armadillo",
+    "Porcupine",
+    "Sloth",
+    "Anteater",
+    "Walrus",
+    "Narwhal"
+  ]
+)
+
+
+# ============================================================================
+# FOOD & DRINK
+# ============================================================================
+
+seed_words(
+  "food-drink",
+
+  easy: [
+    "Pizza",
+    "Burger",
+    "Apple",
+    "Banana",
+    "Cake",
+    "Cookie",
+    "Donut",
+    "Ice Cream",
+    "Hot Dog",
+    "Taco",
+    "Egg",
+    "Bread",
+    "Cheese",
+    "Carrot",
+    "Corn",
+    "Watermelon",
+    "Cupcake",
+    "Popcorn",
+    "Pancake",
+    "French Fries"
+  ],
+
+  medium: [
+    "Spaghetti",
+    "Sushi",
+    "Sandwich",
+    "Pineapple",
+    "Strawberry",
+    "Water Bottle",
+    "Milkshake",
+    "Lemonade",
+    "Pretzel",
+    "Burrito",
+    "Nachos",
+    "Waffle",
+    "Popsicle",
+    "Soup",
+    "Steak",
+    "Turkey",
+    "Coffee",
+    "Tea",
+    "Birthday Cake",
+    "Chocolate Bar"
+  ],
+
+  hard: [
+    "Fortune Cookie",
+    "Layer Cake",
+    "Chocolate Fountain",
+    "Peanut Butter",
+    "Grilled Cheese",
+    "Spaghetti and Meatballs",
+    "Pancake Stack",
+    "Ice Cream Sundae",
+    "Fruit Smoothie",
+    "Charcuterie Board"
+  ]
+)
+
+
+# ============================================================================
+# OBJECTS
+# ============================================================================
+
+seed_words(
+  "objects",
+
+  easy: [
+    "Chair",
+    "Table",
+    "Cup",
+    "Spoon",
+    "Fork",
+    "Plate",
+    "Book",
+    "Phone",
+    "Key",
+    "Clock",
+    "Ball",
+    "Lamp",
+    "Bed",
+    "Door",
+    "Window",
+    "Hat",
+    "Shoe",
+    "Umbrella",
+    "Backpack",
+    "Bottle"
+  ],
+
+  medium: [
+    "Scissors",
+    "Hammer",
+    "Ladder",
+    "Bicycle",
+    "Guitar",
+    "Camera",
+    "Television",
+    "Computer",
+    "Toothbrush",
+    "Flashlight",
+    "Telescope",
+    "Microscope",
+    "Wheelbarrow",
+    "Shopping Cart",
+    "Mailbox",
+    "Suitcase",
+    "Skateboard",
+    "Headphones",
+    "Vacuum Cleaner",
+    "Alarm Clock"
+  ],
+
+  hard: [
+    "Compass",
+    "Hourglass",
+    "Typewriter",
+    "Trophy",
+    "Windmill",
+    "Treasure Chest",
+    "Toolbox",
+    "Record Player",
+    "Magnifying Glass",
+    "Rubik's Cube"
+  ]
+)
+
+
+# ============================================================================
+# PLACES
+# ============================================================================
+
+seed_words(
+  "places",
+
+  easy: [
+    "House",
+    "School",
+    "Park",
+    "Beach",
+    "Store",
+    "Church",
+    "Hospital",
+    "Library",
+    "Farm",
+    "Zoo",
+    "Castle",
+    "Airport",
+    "Restaurant",
+    "Hotel",
+    "Garage",
+    "Pool",
+    "Playground",
+    "Garden",
+    "Office",
+    "Museum"
+  ],
+
+  medium: [
+    "Fire Station",
+    "Police Station",
+    "Gas Station",
+    "Movie Theater",
+    "Train Station",
+    "Supermarket",
+    "Amusement Park",
+    "Water Park",
+    "Camping Ground",
+    "Skyscraper",
+    "Lighthouse",
+    "Stadium",
+    "Bakery",
+    "Coffee Shop",
+    "Bowling Alley",
+    "Bus Stop",
+    "Car Wash",
+    "Construction Site",
+    "Doctor's Office",
+    "Dentist's Office"
+  ],
+
+  hard: [
+    "Haunted House",
+    "Space Station",
+    "Medieval Castle",
+    "Underground Cave",
+    "Desert Oasis",
+    "Mountain Village",
+    "Fishing Pier",
+    "Ski Resort",
+    "Botanical Garden",
+    "Ancient Ruins"
+  ]
+)
+
+
+# ============================================================================
+# SPORTS
+# ============================================================================
+
+seed_words(
+  "sports",
+
+  easy: [
+    "Football",
+    "Basketball",
+    "Baseball",
+    "Soccer",
+    "Tennis",
+    "Golf",
+    "Hockey",
+    "Boxing",
+    "Swimming",
+    "Running",
+    "Bowling",
+    "Volleyball",
+    "Skateboarding",
+    "Surfing",
+    "Skiing",
+    "Bicycle",
+    "Baseball Bat",
+    "Football Helmet",
+    "Soccer Ball",
+    "Basketball Hoop"
+  ],
+
+  medium: [
+    "Tennis Racket",
+    "Golf Club",
+    "Hockey Stick",
+    "Boxing Gloves",
+    "Swimming Pool",
+    "Gymnastics",
+    "Snowboarding",
+    "Rock Climbing",
+    "Horse Racing",
+    "Archery",
+    "Wrestling",
+    "Fencing",
+    "Ice Skating",
+    "Table Tennis",
+    "Mini Golf",
+    "Fishing",
+    "Diving",
+    "Marathon",
+    "Relay Race",
+    "Skate Park"
+  ],
+
+  hard: [
+    "Figure Skating",
+    "Pole Vault",
+    "Shot Put",
+    "High Jump",
+    "Javelin Throw",
+    "Bobsled",
+    "Curling",
+    "Water Polo",
+    "Synchronized Swimming",
+    "Obstacle Course"
+  ]
+)
+
+
+# ============================================================================
+# NATURE
+# ============================================================================
+
+seed_words(
+  "nature",
+
+  easy: [
+    "Tree",
+    "Flower",
+    "Sun",
+    "Moon",
+    "Star",
+    "Cloud",
+    "Rain",
+    "Snow",
+    "Mountain",
+    "River",
+    "Lake",
+    "Ocean",
+    "Rock",
+    "Leaf",
+    "Grass",
+    "Rainbow",
+    "Volcano",
+    "Fire",
+    "Cactus",
+    "Palm Tree"
+  ],
+
+  medium: [
+    "Waterfall",
+    "Lightning",
+    "Thunderstorm",
+    "Sunset",
+    "Sunrise",
+    "Forest",
+    "Desert",
+    "Island",
+    "Glacier",
+    "Cave",
+    "Beach",
+    "Tornado",
+    "Hurricane",
+    "Campfire",
+    "Mushroom",
+    "Pine Tree",
+    "Rose",
+    "Sunflower",
+    "Bamboo",
+    "Coral Reef"
+  ],
+
+  hard: [
+    "Northern Lights",
+    "Eclipse",
+    "Avalanche",
+    "Geyser",
+    "Tidal Wave",
+    "Meteor Shower",
+    "Drought",
+    "Earthquake",
+    "Rainforest",
+    "Fossil"
+  ]
+)
+
+
+# ============================================================================
+# MUSIC
+# ============================================================================
+
+seed_words(
+  "music",
+
+  easy: [
+    "Guitar",
+    "Piano",
+    "Drum",
+    "Trumpet",
+    "Violin",
+    "Flute",
+    "Microphone",
+    "Singer",
+    "Headphones",
+    "Speaker",
+    "Music Note",
+    "Record",
+    "Radio",
+    "Banjo",
+    "Harp",
+    "Saxophone",
+    "Tambourine",
+    "Bell",
+    "Keyboard",
+    "Concert"
+  ],
+
+  medium: [
+    "Drum Set",
+    "Electric Guitar",
+    "Cello",
+    "Accordion",
+    "Harmonica",
+    "Clarinet",
+    "Trombone",
+    "DJ",
+    "Rock Band",
+    "Choir",
+    "Conductor",
+    "Stage",
+    "Vinyl Record",
+    "Piano Keys",
+    "Music Stand",
+    "Guitar Pick",
+    "Record Player",
+    "Concert Ticket",
+    "Karaoke",
+    "Marching Band"
+  ],
+
+  hard: [
+    "Orchestra",
+    "Symphony",
+    "Music Festival",
+    "Opera Singer",
+    "Rock Concert",
+    "Disc Jockey",
+    "Musical Notes",
+    "Sound Wave",
+    "Sheet Music",
+    "Metronome"
+  ]
+)
+
+
+# ============================================================================
+# GAMES
+# ============================================================================
+
+seed_words(
+  "games",
+
+  easy: [
+    "Chess",
+    "Checkers",
+    "Cards",
+    "Dice",
+    "Puzzle",
+    "Balloon",
+    "Kite",
+    "Dart",
+    "Toy Car",
+    "Yo-Yo",
+    "Teddy Bear",
+    "Robot",
+    "Doll",
+    "Marbles",
+    "Dominoes",
+    "Jump Rope",
+    "Board Game",
+    "Video Game",
+    "Controller",
+    "Game Piece"
+  ],
+
+  medium: [
+    "Jigsaw Puzzle",
+    "Rubik's Cube",
+    "Pinball",
+    "Arcade Machine",
+    "Slot Machine",
+    "Treasure Hunt",
+    "Hide and Seek",
+    "Musical Chairs",
+    "Tag",
+    "Simon Says",
+    "Rock Paper Scissors",
+    "Connect Four",
+    "Monopoly",
+    "Scrabble",
+    "Clue",
+    "Battleship",
+    "Game Show",
+    "Roller Coaster",
+    "Carnival",
+    "Laser Tag"
+  ],
+
+  hard: [
+    "Escape Room",
+    "Scavenger Hunt",
+    "Dungeons and Dragons",
+    "Video Game Boss",
+    "Treasure Map",
+    "Obstacle Course",
+    "Arcade Cabinet",
+    "Board Game Night",
+    "Virtual Reality",
+    "Game Controller"
+  ]
+)
+
+seed_words(
+  "sobriety",
+    easy: [
+      "Coffee",
+      "Chair",
+      "Book",
+      "Key",
+      "Clock",
+      "Coin",
+      "Cup",
+      "Phone",
+      "Door",
+      "Table",
+      "Calendar",
+      "Bottle",
+      "Circle",
+      "Hand",
+      "Heart",
+      "Star",
+      "Sunrise",
+      "Road",
+      "Bridge",
+      "Home"
+    ],
+    medium: [
+      "Meeting",
+      "Sponsor",
+      "Handshake",
+      "Group",
+      "Recovery",
+      "Journal",
+      "Prayer",
+      "Meditation",
+      "Serenity",
+      "Step",
+      "Tradition",
+      "Anniversary",
+      "Sobriety Chip",
+      "Meeting Chair",
+      "Coffee Pot",
+      "Big Book",
+      "Open Door",
+      "Helping Hand",
+      "One Day at a Time",
+      "Starting Over"
+    ],
+    hard: [
+      "Higher Power",
+      "Letting Go",
+      "Making Amends",
+      "Character Defect",
+      "Fear",
+      "Resentment",
+      "Acceptance",
+      "Gratitude",
+      "Humility",
+      "Honesty"
+    ]
+)
+
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+
+puts
+puts "============================================"
+puts "HUMBLDRAW seed complete"
+puts "============================================"
+
+Category.order(:position).each do |category|
+  puts format(
+    "%-20s %3d words",
+    category.name,
+    category.words.count
+  )
+end
+
+puts "--------------------------------------------"
+puts format("%-20s %3d words", "TOTAL", Word.count)
+puts "============================================"
