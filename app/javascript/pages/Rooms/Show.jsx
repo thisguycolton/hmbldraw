@@ -280,6 +280,38 @@ export default function Show({
   }
 
   // --------------------------------------------------------------------------
+// Mobile drawing viewport lock
+// --------------------------------------------------------------------------
+
+useEffect(() => {
+  if (typeof document === "undefined") {
+    return
+  }
+
+  if (gameState !== "drawing") {
+    document.documentElement.style.overflow = ""
+    document.body.style.overflow = ""
+    document.body.style.overscrollBehavior = ""
+
+    return
+  }
+
+  const htmlOverflow = document.documentElement.style.overflow
+  const bodyOverflow = document.body.style.overflow
+  const bodyOverscroll = document.body.style.overscrollBehavior
+
+  document.documentElement.style.overflow = "hidden"
+  document.body.style.overflow = "hidden"
+  document.body.style.overscrollBehavior = "none"
+
+  return () => {
+    document.documentElement.style.overflow = htmlOverflow
+    document.body.style.overflow = bodyOverflow
+    document.body.style.overscrollBehavior = bodyOverscroll
+  }
+}, [gameState])
+
+  // --------------------------------------------------------------------------
   // Persist player token
   // --------------------------------------------------------------------------
 
@@ -1789,205 +1821,42 @@ return (
         {/* DRAWING                                                           */}
         {/* ================================================================= */}
 
+
         {gameState === "drawing" &&
           currentRound && (
-            <GameWorkspace
-              aside={
-                <>
-                  {/* Round controls */}
+            <>
 
-                  <div className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
-                          Round
-                        </p>
 
-                        <p className="mt-1 font-semibold">
-                          {currentRound.number}
-                        </p>
-                      </div>
+              {/* ============================================================= */}
+        {/* MOBILE DRAWING SCREEN                                         */}
+        {/* ============================================================= */}
 
-                      {isDrawer && (
-                        <button
-                          type="button"
-                          onClick={clearCanvas}
-                          disabled={
-                            timeLeft === null ||
-                            timeLeft <= 0 ||
-                            strokes.length === 0
-                          }
-                          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-                        >
-                          Clear
-                        </button>
-                      )}
-                    </div>
-                  </div>
+        <section className="fixed inset-0 z-50 overflow-hidden bg-zinc-950 md:hidden">
+          <div
+            className="relative h-[100dvh] w-full overflow-hidden overscroll-none"
+            style={{
+              paddingTop: "env(safe-area-inset-top)",
+              paddingBottom: "env(safe-area-inset-bottom)",
+            }}
+          >
+            {/* ========================================================= */}
+            {/* CANVAS + TOOLBAR                                           */}
+            {/* ========================================================= */}
 
-                  {/* Guesses */}
-
-                  <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
-
-                    <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-                      <div>
-                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
-                          Guesses
-                        </p>
-
-                        {isDrawer && (
-                          <p className="mt-1 text-xs text-zinc-600">
-                            See what everyone is thinking
-                          </p>
-                        )}
-                      </div>
-
-                      <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-500">
-                        {
-                          guesses.filter(
-                            (guess) => !guess.correct
-                          ).length
-                        }
-                      </span>
-                    </div>
-
-                    <div className="max-h-72 overflow-y-auto">
-                      {guesses.filter(
-                        (guess) => !guess.correct
-                      ).length > 0 ? (
-                        guesses
-                          .filter(
-                            (guess) => !guess.correct
-                          )
-                          .slice()
-                          .reverse()
-                          .map((guess) => (
-                            <div
-                              key={guess.id}
-                              className="flex items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-3 last:border-0"
-                            >
-                              <div className="flex min-w-0 items-center gap-3">
-                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-xs font-bold">
-                                  {guess.player.name
-                                    .charAt(0)
-                                    .toUpperCase()}
-                                </div>
-
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium">
-                                    {guess.player.name}
-                                  </p>
-
-                                  <p className="truncate text-sm text-zinc-500">
-                                    {guess.text}
-                                  </p>
-                                </div>
-                              </div>
-
-                              {isDrawer && (
-                                <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-zinc-700">
-                                  Wrong
-                                </span>
-                              )}
-                            </div>
-                          ))
-                      ) : (
-                        <div className="px-4 py-8 text-center">
-                          <p className="text-sm text-zinc-600">
-                            No guesses yet.
-                          </p>
-
-                          {isDrawer && (
-                            <p className="mt-1 text-xs text-zinc-700">
-                              Guesses will appear here.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    {!isDrawer &&
-                      timeLeft !== null &&
-                      timeLeft > 0 && (
-                        <div className="border-t border-zinc-800 p-3">
-                          <form
-                            onSubmit={submitGuess}
-                            className="flex gap-2"
-                          >
-                            <input
-                              type="text"
-                              value={guessText}
-                              onChange={(event) =>
-                                setGuessText(
-                                  event.target.value
-                                )
-                              }
-                              maxLength={100}
-                              placeholder="What is it?"
-                              className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
-                            />
-
-                            <button
-                              type="submit"
-                              disabled={!guessText.trim()}
-                              className="shrink-0 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
-                            >
-                              Guess
-                            </button>
-                          </form>
-                        </div>
-                      )}
-
-                  </div>
-                </>
-              }
+            <div
+              className="absolute inset-x-0 bottom-0 overflow-hidden bg-white"
+              style={{
+                /*
+                * Reserve the top of the screen for the game HUD.
+                *
+                * GameCanvas contains its own drawing toolbar, so the
+                * entire GameCanvas needs to begin BELOW the HUD rather
+                * than underneath it.
+                */
+                top: "calc(env(safe-area-inset-top) + 108px)",
+              }}
             >
-
-              {/* Canvas header */}
-
-              <div className="mb-3 flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-500">
-                    Round {currentRound.number}
-                  </p>
-
-                  <h2 className="mt-1 truncate text-xl font-bold">
-                    {isDrawer
-                      ? "Your turn"
-                      : `${currentRound.drawer.name} is drawing`}
-                  </h2>
-                </div>
-
-                {timeLeft !== null && (
-                  <div
-                    className={`shrink-0 rounded-xl border px-4 py-2 text-center font-mono text-xl font-bold sm:px-5 sm:text-2xl ${
-                      timeLeft <= 10
-                        ? "border-red-500/50 bg-red-950/40 text-red-400"
-                        : "border-zinc-700 bg-zinc-900 text-white"
-                    }`}
-                  >
-                    {timeLeft}
-                  </div>
-                )}
-              </div>
-
-              {/* Drawer word */}
-
-              {isDrawer && selectedWord && (
-                <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-center shadow-lg">
-                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
-                    Your word
-                  </div>
-
-                  <div className="mt-1 text-2xl font-bold tracking-tight text-white uppercase">
-                    {selectedWord}
-                  </div>
-                </div>
-              )}
-
-              {/* Square drawing surface */}
-
-              <div className="aspect-square w-full overflow-hidden rounded-2xl border border-zinc-800 bg-white">
+              <div className="drawing-canvas-shell absolute inset-0 overflow-hidden">
                 <GameCanvas
                   roundId={currentRound.id}
                   strokes={[
@@ -2005,9 +1874,427 @@ return (
                   onClear={clearCanvas}
                 />
               </div>
+            </div>
 
-            </GameWorkspace>
+            {/* ========================================================= */}
+            {/* TOP HUD                                                     */}
+            {/* ========================================================= */}
+
+            <div
+              className="pointer-events-none absolute inset-x-0 top-0 z-50"
+              style={{
+                paddingTop: "calc(env(safe-area-inset-top) + 10px)",
+              }}
+            >
+              <div className="flex items-start justify-between px-3">
+                {/* Round / drawer */}
+
+                <div className="rounded-2xl border border-white/10 bg-zinc-950/90 px-4 py-2.5 shadow-xl backdrop-blur-md">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                    Round {currentRound.number}
+                  </div>
+
+                  <div className="mt-0.5 max-w-[190px] truncate text-sm font-semibold text-white">
+                    {isDrawer
+                      ? "Your turn"
+                      : `${currentRound.drawer.name} is drawing`}
+                  </div>
+                </div>
+
+                {/* Timer */}
+
+                {timeLeft !== null && (
+                  <div
+                    className={[
+                      "flex h-16 min-w-16 items-center justify-center rounded-2xl border px-4 font-mono text-2xl font-bold shadow-xl backdrop-blur-md",
+                      timeLeft <= 10
+                        ? "border-red-500/50 bg-red-950/90 text-red-400"
+                        : "border-white/10 bg-zinc-950/90 text-white",
+                    ].join(" ")}
+                  >
+                    {timeLeft}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ========================================================= */}
+            {/* DRAWER WORD                                                 */}
+            {/* ========================================================= */}
+
+            {isDrawer && selectedWord && (
+              <div
+                className="pointer-events-none absolute inset-x-0 z-50 flex justify-center px-3"
+                style={{
+                  /*
+                  * This is now below the HUD but above the drawing surface.
+                  * It does NOT overlap the toolbar because the GameCanvas
+                  * itself starts at 108px.
+                  */
+                  top: "calc(env(safe-area-inset-top) + 18px)",
+                }}
+              >
+                <div className="rounded-2xl border border-white/10 bg-zinc-950/90 px-5 py-2.5 text-center shadow-xl backdrop-blur-md">
+                  <div className="text-[8px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                    Your word
+                  </div>
+
+                  <div className="mt-0.5 text-lg font-bold uppercase tracking-tight text-white">
+                    {selectedWord}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================= */}
+            {/* FLOATING GUESSES                                            */}
+            {/* ========================================================= */}
+
+            <div
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-50"
+              style={{
+                paddingBottom:
+                  "calc(env(safe-area-inset-bottom) + 92px)",
+              }}
+            >
+              <div className="px-3">
+                <div className="ml-auto w-[min(82vw,340px)]">
+                  {guesses.filter(
+                    (guess) => !guess.correct
+                  ).length > 0 && (
+                    <div className="max-h-[24dvh] overflow-hidden">
+                      <div className="flex flex-col items-end gap-1.5">
+                        {guesses
+                          .filter(
+                            (guess) => !guess.correct
+                          )
+                          .slice(-5)
+                          .map((guess) => (
+                            <div
+                              key={guess.id}
+                              className="max-w-[88%] rounded-2xl border border-zinc-700/70 bg-zinc-950/85 px-3 py-2 shadow-lg backdrop-blur-md"
+                            >
+                              <div className="flex items-baseline gap-2">
+                                <span className="shrink-0 text-[10px] font-semibold text-zinc-400">
+                                  {guess.player?.name ||
+                                    "Player"}
+                                </span>
+
+                                <span className="truncate text-xs font-medium text-white">
+                                  {guess.text}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* ========================================================= */}
+            {/* GUESS INPUT                                                 */}
+            {/* ========================================================= */}
+
+            {!isDrawer &&
+              timeLeft !== null &&
+              timeLeft > 0 && (
+                <div
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[60] px-3"
+                  style={{
+                    paddingBottom:
+                      "calc(env(safe-area-inset-bottom) + 10px)",
+                  }}
+                >
+                  <form
+                    onSubmit={submitGuess}
+                    className="pointer-events-auto flex gap-2 rounded-2xl border border-zinc-700/80 bg-zinc-950/95 p-2 shadow-2xl backdrop-blur-md"
+                  >
+                    <input
+                      type="text"
+                      value={guessText}
+                      onChange={(event) =>
+                        setGuessText(event.target.value)
+                      }
+                      maxLength={100}
+                      placeholder="What is it?"
+                      autoComplete="off"
+                      enterKeyHint="send"
+                      className="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-3 text-base text-white outline-none placeholder:text-zinc-600 focus:border-zinc-500 focus:bg-zinc-800"
+                    />
+
+                    <button
+                      type="submit"
+                      disabled={!guessText.trim()}
+                      className="shrink-0 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-950 transition active:scale-95 disabled:opacity-30"
+                    >
+                      Guess
+                    </button>
+                  </form>
+                </div>
+              )}
+
+            {/* ========================================================= */}
+            {/* DRAWER CLEAR                                                */}
+            {/* ========================================================= */}
+
+            {isDrawer && (
+              <div
+                className="pointer-events-none absolute bottom-0 left-0 z-[60]"
+                style={{
+                  paddingBottom:
+                    "calc(env(safe-area-inset-bottom) + 12px)",
+                }}
+              >
+                <div className="px-3">
+                  <button
+                    type="button"
+                    onClick={clearCanvas}
+                    disabled={
+                      timeLeft === null ||
+                      timeLeft <= 0 ||
+                      strokes.length === 0
+                    }
+                    className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-zinc-700/80 bg-zinc-950/90 px-4 py-3 text-sm font-semibold text-zinc-300 shadow-xl backdrop-blur-md transition active:scale-95 disabled:opacity-30"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      className="h-4 w-4"
+                      aria-hidden="true"
+                    >
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4h8v2" />
+                      <path d="M19 6l-1 14H6L5 6" />
+                      <path d="M10 11v5" />
+                      <path d="M14 11v5" />
+                    </svg>
+
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+      {/* ============================================================= */}
+      {/* DESKTOP DRAWING SCREEN                                        */}
+      {/* ============================================================= */}
+
+      <div className="hidden md:block">
+        <GameWorkspace
+          aside={
+            <>
+              {/* Round controls */}
+
+              <div className="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
+                      Round
+                    </p>
+
+                    <p className="mt-1 font-semibold">
+                      {currentRound.number}
+                    </p>
+                  </div>
+
+                  {isDrawer && (
+                    <button
+                      type="button"
+                      onClick={clearCanvas}
+                      disabled={
+                        timeLeft === null ||
+                        timeLeft <= 0 ||
+                        strokes.length === 0
+                      }
+                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Guesses */}
+
+              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
+                      Guesses
+                    </p>
+
+                    {isDrawer && (
+                      <p className="mt-1 text-xs text-zinc-600">
+                        See what everyone is thinking
+                      </p>
+                    )}
+                  </div>
+
+                  <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-500">
+                    {
+                      guesses.filter(
+                        (guess) => !guess.correct
+                      ).length
+                    }
+                  </span>
+                </div>
+
+                <div className="max-h-72 overflow-y-auto">
+                  {guesses.filter(
+                    (guess) => !guess.correct
+                  ).length > 0 ? (
+                    guesses
+                      .filter(
+                        (guess) => !guess.correct
+                      )
+                      .slice()
+                      .reverse()
+                      .map((guess) => (
+                        <div
+                          key={guess.id}
+                          className="flex items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-3 last:border-0"
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-xs font-bold">
+                              {guess.player.name
+                                .charAt(0)
+                                .toUpperCase()}
+                            </div>
+
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">
+                                {guess.player.name}
+                              </p>
+
+                              <p className="truncate text-sm text-zinc-500">
+                                {guess.text}
+                              </p>
+                            </div>
+                          </div>
+
+                          {isDrawer && (
+                            <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-zinc-700">
+                              Wrong
+                            </span>
+                          )}
+                        </div>
+                      ))
+                  ) : (
+                    <div className="px-4 py-8 text-center">
+                      <p className="text-sm text-zinc-600">
+                        No guesses yet.
+                      </p>
+
+                      {isDrawer && (
+                        <p className="mt-1 text-xs text-zinc-700">
+                          Guesses will appear here.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {!isDrawer &&
+                  timeLeft !== null &&
+                  timeLeft > 0 && (
+                    <div className="border-t border-zinc-800 p-3">
+                      <form
+                        onSubmit={submitGuess}
+                        className="flex gap-2"
+                      >
+                        <input
+                          type="text"
+                          value={guessText}
+                          onChange={(event) =>
+                            setGuessText(
+                              event.target.value
+                            )
+                          }
+                          maxLength={100}
+                          placeholder="What is it?"
+                          className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
+                        />
+
+                        <button
+                          type="submit"
+                          disabled={!guessText.trim()}
+                          className="shrink-0 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          Guess
+                        </button>
+                      </form>
+                    </div>
+                  )}
+              </div>
+            </>
+          }
+        >
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-[0.25em] text-zinc-500">
+                Round {currentRound.number}
+              </p>
+
+              <h2 className="mt-1 truncate text-xl font-bold">
+                {isDrawer
+                  ? "Your turn"
+                  : `${currentRound.drawer.name} is drawing`}
+              </h2>
+            </div>
+
+            {timeLeft !== null && (
+              <div
+                className={`shrink-0 rounded-xl border px-4 py-2 text-center font-mono text-xl font-bold sm:px-5 sm:text-2xl ${
+                  timeLeft <= 10
+                    ? "border-red-500/50 bg-red-950/40 text-red-400"
+                    : "border-zinc-700 bg-zinc-900 text-white"
+                }`}
+              >
+                {timeLeft}
+              </div>
+            )}
+          </div>
+
+          {isDrawer && selectedWord && (
+            <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-center shadow-lg">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
+                Your word
+              </div>
+
+              <div className="mt-1 text-2xl font-bold tracking-tight text-white uppercase">
+                {selectedWord}
+              </div>
+            </div>
           )}
+
+          <div className="aspect-square w-full overflow-hidden rounded-2xl border border-zinc-800 bg-white">
+            <GameCanvas
+              roundId={currentRound.id}
+              strokes={[
+                ...strokes,
+                ...Object.values(liveStrokes),
+              ]}
+              canDraw={
+                isDrawer &&
+                timeLeft !== null &&
+                timeLeft > 0
+              }
+              onStroke={drawStroke}
+              onLiveStroke={sendLiveStroke}
+              onUndo={undoStroke}
+              onClear={clearCanvas}
+            />
+          </div>
+        </GameWorkspace>
+      </div>
+    </>
+  )}
 
         {/* ================================================================= */}
         {/* ROUND END                                                         */}
