@@ -102,7 +102,7 @@ function PreviousRoundResults({ round }) {
       <div className="border-t border-zinc-800">
         {/* Drawing */}
         <div className="p-4">
-          <div className="aspect-square w-full overflow-hidden rounded-xl bg-white">
+          <div className="aspect-square w-full overflow-hidden rounded-2xl bg-white">
             <GameCanvas
               roundId={round.id}
               strokes={round.strokes || []}
@@ -396,7 +396,6 @@ useEffect(() => {
       },
 
       received(data) {
-        console.log("[ActionCable] Received:", data)
 
         // --------------------------------------------------------------
         // Lobby

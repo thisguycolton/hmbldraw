@@ -207,7 +207,7 @@ end
   # --------------------------------------------------------------------------
 
 def draw_live(data)
-  round = current_round!
+  round = live_drawing_round!
 
   unless round.drawer_id == @player.id
     raise GameRoomGame::Error,
@@ -574,6 +574,34 @@ def unsubscribed
 end
 
   private
+
+  def live_drawing_round!
+  round = @live_drawing_round
+
+  if round
+    return round
+  end
+
+  @game_room.reload
+
+  round =
+    @game_room.rounds.find_by(
+      game_number: @game_room.game_number,
+      number: @game_room.current_round
+    )
+
+  raise GameRoomGame::Error, "No active round." unless round
+
+  unless @game_room.status == "drawing" &&
+         round.status == "drawing"
+    raise GameRoomGame::Error,
+          "The round is not currently drawing."
+  end
+
+  @live_drawing_round = round
+
+  round
+end
 
   # --------------------------------------------------------------------------
   # Restore current game state for a newly connected browser
