@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   ChevronDown,
   Circle,
@@ -24,44 +24,27 @@ import {
   ChevronsDown,
 } from "lucide-react"
 
+import { hexToHsv, hsvToHex } from "./colorUtils"
+import {
+  COLORS,
+  DEFAULT_COLOR,
+  DEFAULT_WIDTH,
+  EDIT_TOOLS,
+  SHAPE_TOOLS,
+  STROKE_WIDTHS,
+  TOOLS,
+} from "./drawingConstants"
+
 const CANVAS_SIZE = 1200
 const CANVAS_WIDTH = CANVAS_SIZE
 const CANVAS_HEIGHT = CANVAS_SIZE
-
-const DEFAULT_COLOR = "#18181b"
-const DEFAULT_WIDTH = 6
-
-const COLORS = [
-  "#18181b",
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#22c55e",
-  "#06b6d4",
-  "#3b82f6",
-  "#8b5cf6",
-  "#ec4899",
-  "#ffffff",
-]
-
-const STROKE_WIDTHS = [
-  { label: "Thin", value: 3 },
-  { label: "Medium", value: 6 },
-  { label: "Thick", value: 12 },
-  { label: "Huge", value: 24 },
-]
 
 const LIVE_UPDATE_INTERVAL = 30
 const MIN_POINT_DISTANCE = 0.0015
 
 const FILL_TOLERANCE = 18
-const FILL_EDGE_TOLERANCE = 64
-
 const PEN_SIMPLIFY_TOLERANCE = 0.0018
 const PEN_MAX_POINTS = 450
-
-// Reference Pen behavior uses a 28px close distance on a 1200px canvas.
-const PEN_CLOSE_DISTANCE = 28 / CANVAS_SIZE
 
 function shouldSnapPenClosed(points) {
   // Pen strokes are shape-like freeform paths. Once the user has supplied
@@ -83,33 +66,6 @@ function snapPenClosed(points) {
 
 const ERASER_MIN_RADIUS = 0.012
 const ERASER_MAX_RADIUS = 0.12
-
-const TOOLS = {
-  SELECT: "select",
-  PENCIL: "pencil",
-  PEN: "pen",
-  LINE: "line",
-  CIRCLE: "circle",
-  SQUARE: "square",
-  TRIANGLE: "triangle",
-  ERASER: "eraser",
-  BUCKET: "bucket",
-  ANCHOR: "anchor",
-  CURVE: "curve",
-}
-
-const SHAPE_TOOLS = [
-  TOOLS.LINE,
-  TOOLS.CIRCLE,
-  TOOLS.SQUARE,
-  TOOLS.TRIANGLE,
-]
-
-const EDIT_TOOLS = [
-  TOOLS.SELECT,
-  TOOLS.ANCHOR,
-  TOOLS.CURVE,
-]
 
 /*
  * ---------------------------------------------------------------------------
@@ -143,44 +99,6 @@ function createStrokeId() {
   return `${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`
-}
-
-function hexToHsv(hex) {
-  const value = String(hex || "#18181b").replace("#", "")
-  if (!/^[0-9a-fA-F]{6}$/.test(value)) return { h: 0, s: 0, v: 0.0941 }
-  const r = parseInt(value.slice(0, 2), 16) / 255
-  const g = parseInt(value.slice(2, 4), 16) / 255
-  const b = parseInt(value.slice(4, 6), 16) / 255
-  const max = Math.max(r, g, b)
-  const min = Math.min(r, g, b)
-  const delta = max - min
-  let h = 0
-  if (delta) {
-    if (max === r) h = ((g - b) / delta) % 6
-    else if (max === g) h = (b - r) / delta + 2
-    else h = (r - g) / delta + 4
-    h *= 60
-    if (h < 0) h += 360
-  }
-  return { h, s: max === 0 ? 0 : delta / max, v: max }
-}
-
-function hsvToHex(h, s, v) {
-  const hue = ((Number(h) % 360) + 360) % 360
-  const saturation = clamp(Number(s) || 0, 0, 1)
-  const value = clamp(Number(v) || 0, 0, 1)
-  const c = value * saturation
-  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
-  const m = value - c
-  let r = 0, g = 0, b = 0
-  if (hue < 60) { r = c; g = x }
-  else if (hue < 120) { r = x; g = c }
-  else if (hue < 180) { g = c; b = x }
-  else if (hue < 240) { g = x; b = c }
-  else if (hue < 300) { r = x; b = c }
-  else { r = c; b = x }
-  const ch = (n) => Math.round((n + m) * 255).toString(16).padStart(2, "0")
-  return `#${ch(r)}${ch(g)}${ch(b)}`
 }
 
 function clonePoint(point) {
@@ -757,16 +675,42 @@ function erasePolyline(
     return []
   }
 
+  const sampledPoints = [clonePoint(points[0])]
+
+  for (let i = 1; i < points.length; i += 1) {
+    const start = points[i - 1]
+    const end = points[i]
+    const steps = Math.min(
+      100,
+      Math.max(1, Math.ceil(pointDistance(start, end) / Math.max(radius / 2, 0.001)))
+    )
+
+    for (let step = 1; step <= steps; step += 1) {
+      const ratio = step / steps
+      sampledPoints.push([
+        start[0] + (end[0] - start[0]) * ratio,
+        start[1] + (end[1] - start[1]) * ratio,
+      ])
+    }
+  }
+
+  // Round-trip payloads are capped at 5,000 points by the channel. Keep the
+  // local preview within the same limit so canonical reconciliation cannot
+  // subtly change a very long erased path.
+  const workingPoints =
+    sampledPoints.length > 5000
+      ? resamplePoints(sampledPoints, 5000)
+      : sampledPoints
   const survivingSegments = []
   let current = []
 
   for (
     let i = 0;
-    i < points.length;
+    i < workingPoints.length;
     i += 1
   ) {
     const point =
-      points[i]
+      workingPoints[i]
 
     const distance =
       pointDistance(
@@ -817,14 +761,15 @@ function convertShapeToPath(
     return null
   }
 
+  if (Array.isArray(operation.points) && operation.points.length >= 2) {
+    return clonePoints(operation.points)
+  }
+
   if (
     operation.shape ===
     "line"
   ) {
-    return [
-      operation.start,
-      operation.end,
-    ]
+    return [operation.start, operation.end].filter(Boolean).map(clonePoint)
   }
 
   if (
@@ -905,6 +850,27 @@ function convertShapeToPath(
   ]
 }
 
+function prepareEditableOperation(operation, pathMode = "linear") {
+  const editable = cloneOperation(operation)
+
+  if (editable.type === "shape") {
+    editable.type = "stroke"
+    editable.pen = false
+    editable.points = clonePoints(
+      Array.isArray(editable.points) && editable.points.length >= 2
+        ? editable.points
+        : convertShapeToPath(editable)
+    )
+    editable.closed = editable.shape !== "line"
+    editable.pathMode = pathMode
+    editable.bounds = calculateBoundsFromPoints(editable.points)
+  } else if (pathMode === "smooth") {
+    editable.pathMode = "smooth"
+  }
+
+  return editable
+}
+
 function eraseOperation(
   operation,
   eraserPoint,
@@ -943,7 +909,8 @@ function eraseOperation(
   if (
     Array.isArray(
       operation.points
-    )
+    ) &&
+    operation.type !== "shape"
   ) {
     const segments =
       erasePolyline(
@@ -1229,6 +1196,15 @@ function operationContainsPoint(
       operation.points
     )
   ) {
+    if (
+      operation.closed &&
+      operation.fill &&
+      operation.points.length >= 3 &&
+      pointInPolygon(point, operation.points)
+    ) {
+      return true
+    }
+
     const threshold =
       Math.max(
         0.012,
@@ -1359,9 +1335,6 @@ export default function GameCanvas({
   const [showLayers, setShowLayers] =
     useState(false)
 
-  const [hiddenLayers, setHiddenLayers] =
-    useState(() => new Set())
-
   const canvasRef =
     useRef(null)
 
@@ -1392,6 +1365,9 @@ export default function GameCanvas({
         ? strokes
         : []
     )
+
+  const activeRoundIdRef =
+    useRef(roundId)
 
   const localOperationsRef =
     useRef([])
@@ -1448,8 +1424,26 @@ export default function GameCanvas({
   const editRef =
     useRef(null)
 
-  const layersRef =
-    useRef([])
+  const eraseEditRef =
+    useRef(null)
+
+  useEffect(() => {
+    if (activeRoundIdRef.current === roundId) return
+
+    activeRoundIdRef.current = roundId
+    localOperationsRef.current = []
+    localVersionRef.current += 1
+    resolvedCacheRef.current.server = null
+    drawingRef.current = false
+    currentStrokeRef.current = null
+    currentShapeRef.current = null
+    editRef.current = null
+    eraseEditRef.current = null
+    selectedOperationIdRef.current = null
+    selectedAnchorIndexRef.current = null
+    setSelectedOperationId(null)
+    setSelectedAnchorIndex(null)
+  }, [roundId])
 
   useEffect(() => {
     strokesRef.current =
@@ -1659,8 +1653,7 @@ export default function GameCanvas({
    */
 
   function getResolvedOperations() {
-    const cached =
-      resolvedCacheRef.current
+    const cached = resolvedCacheRef.current
 
     if (
       cached.server === strokesRef.current &&
@@ -1670,190 +1663,88 @@ export default function GameCanvas({
     }
 
     const result = []
+    const indexById = new Map()
 
-    const indexById =
-      new Map()
+    const rebuildIndex = () => {
+      indexById.clear()
+      result.forEach((item, index) => {
+        indexById.set(String(item.id), index)
+      })
+    }
 
-    const applyOperation =
-      (operation) => {
-        if (!operation) {
-          return
-        }
+    const applyOperation = (operation) => {
+      if (!operation) return
 
-        if (
-          operation.type ===
-          "layer_reorder"
-        ) {
-          const order =
-            Array.isArray(operation.order)
-              ? operation.order.map(String)
-              : []
-
-          if (order.length > 0) {
-            const rank = new Map(
-              order.map((id, position) => [
-                id,
-                position,
-              ])
-            )
-
-            result.sort((a, b) => {
-              const ar = rank.has(String(a.id))
-                ? rank.get(String(a.id))
-                : order.length + result.indexOf(a)
-
-              const br = rank.has(String(b.id))
-                ? rank.get(String(b.id))
-                : order.length + result.indexOf(b)
-
-              return ar - br
-            })
-
-            indexById.clear()
-            result.forEach((item, itemIndex) => {
-              if (item) {
-                indexById.set(item.id, itemIndex)
-              }
-            })
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_update"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index == null
-          ) {
-            return
-          }
-
-          result[index] = {
-            ...result[index],
-            ...cloneOperation(
-              operation.changes ||
-                {}
-            ),
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_delete"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index == null
-          ) {
-            return
-          }
-
-          result[index] = null
-          return
-        }
-
-        if (
-          operation.type ===
-          "layer_reorder"
-        ) {
-          const order =
-            Array.isArray(operation.order)
-              ? operation.order
-              : []
-
-          if (order.length > 0) {
-            const rank =
-              new Map(
-                order.map(
-                  (id, position) => [
-                    id,
-                    position,
-                  ]
-                )
-              )
-
-            result.sort(
-              (a, b) => {
-                const ar =
-                  rank.has(a.id)
-                    ? rank.get(a.id)
-                    : order.length + 100000 + result.indexOf(a)
-                const br =
-                  rank.has(b.id)
-                    ? rank.get(b.id)
-                    : order.length + 100000 + result.indexOf(b)
-                return ar - br
-              }
-            )
-
-            indexById.clear()
-            result.forEach(
-              (item, itemIndex) => {
-                if (item) {
-                  indexById.set(
-                    item.id,
-                    itemIndex
-                  )
-                }
-              }
-            )
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_restore"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index != null
-          ) {
-            result[index] =
-              cloneOperation(
-                operation.object
-              )
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "erase"
-        ) {
-          return
-        }
-
-        indexById.set(
-          operation.id,
-          result.length
-        )
-
-        result.push(
-          cloneOperation(
-            operation
-          )
-        )
+      if (operation.type === "canvas_clear") {
+        result.splice(0, result.length)
+        rebuildIndex()
+        return
       }
+
+      if (operation.type === "layer_reorder") {
+        const order = Array.isArray(operation.order)
+          ? operation.order.map(String)
+          : []
+
+        if (order.length > 0) {
+          const rank = new Map(
+            order.map((id, position) => [id, position])
+          )
+          const originalRank = new Map(
+            result.map((item, position) => [String(item.id), position])
+          )
+
+          result.sort((a, b) => {
+            const ar = rank.has(String(a.id))
+              ? rank.get(String(a.id))
+              : order.length + originalRank.get(String(a.id))
+            const br = rank.has(String(b.id))
+              ? rank.get(String(b.id))
+              : order.length + originalRank.get(String(b.id))
+            return ar - br
+          })
+          rebuildIndex()
+        }
+        return
+      }
+
+      if (operation.type === "object_update") {
+        const index = indexById.get(String(operation.objectId))
+        if (index == null) return
+
+        result[index] = {
+          ...result[index],
+          ...cloneOperation(operation.changes || {}),
+        }
+        return
+      }
+
+      if (operation.type === "object_delete") {
+        const index = indexById.get(String(operation.objectId))
+        if (index == null) return
+
+        result.splice(index, 1)
+        rebuildIndex()
+        return
+      }
+
+      if (operation.type === "erase") {
+        for (const change of operation.changes || []) {
+          const index = indexById.get(String(change.objectId))
+          if (index == null) continue
+
+          const after = Array.isArray(change.after)
+            ? change.after.map(cloneOperation).filter(Boolean)
+            : []
+          result.splice(index, 1, ...after)
+          rebuildIndex()
+        }
+        return
+      }
+
+      indexById.set(String(operation.id), result.length)
+      result.push(cloneOperation(operation))
+    }
 
     for (
       const operation of
@@ -1882,14 +1773,11 @@ export default function GameCanvas({
       }
     }
 
-    const resolved =
-      result.filter(Boolean)
-
     cached.server = strokesRef.current
     cached.localVersion = localVersionRef.current
-    cached.operations = resolved
+    cached.operations = result
 
-    return resolved
+    return result
   }
 
   /*
@@ -2033,6 +1921,8 @@ export default function GameCanvas({
   const handleClear = () => {
     if (!canDraw) return
 
+    if (getResolvedOperations().length === 0) return
+
     // Clear local editing state
     selectedOperationIdRef.current = null
     selectedAnchorIndexRef.current = null
@@ -2059,8 +1949,16 @@ export default function GameCanvas({
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
     })
 
-    // Tell the game/server to clear the round's drawing.
-    onClearRef.current?.()
+    const operation = {
+      id: createStrokeId(),
+      type: "canvas_clear",
+    }
+
+    localOperationsRef.current.push(operation)
+    localVersionRef.current += 1
+
+    // Tell the game/server to append an undoable clear operation.
+    onClearRef.current?.(operation)
   }
 
   function handleCursorLeave() {
@@ -2121,7 +2019,9 @@ export default function GameCanvas({
       currentTool ===
         TOOLS.ANCHOR ||
       currentTool ===
-        TOOLS.CURVE
+        TOOLS.CURVE ||
+      currentTool ===
+        TOOLS.ROTATE
     ) {
       handleEditDown(
         point,
@@ -2180,6 +2080,11 @@ export default function GameCanvas({
               12
             ),
         }
+
+      eraseEditRef.current = {
+        operations: getResolvedOperations().map(cloneOperation),
+        changedRoots: new Set(),
+      }
 
       pendingPointsRef.current =
         [point]
@@ -2594,7 +2499,35 @@ export default function GameCanvas({
       currentTool ===
       TOOLS.ERASER
     ) {
+      const eraseStroke = currentStrokeRef.current
+      const eraseEdit = eraseEditRef.current
+
+      if (eraseStroke && eraseEdit && eraseEdit.changedRoots.size > 0) {
+        const changes = [...eraseEdit.changedRoots].map((objectId) => ({
+          objectId,
+          after: eraseEdit.operations
+            .filter(
+              (operation) =>
+                (operation._eraseRootId || operation.id) === objectId
+            )
+            .map((operation) => {
+              const persisted = cloneOperation(operation)
+              delete persisted._eraseRootId
+              return persisted
+            }),
+        }))
+
+        commitOperation({
+          id: eraseStroke.id,
+          type: "erase",
+          changes,
+        })
+      }
+
       currentStrokeRef.current =
+        null
+
+      eraseEditRef.current =
         null
 
       pendingPointsRef.current =
@@ -2732,6 +2665,9 @@ export default function GameCanvas({
       null
 
     currentShapeRef.current =
+      null
+
+    eraseEditRef.current =
       null
 
     pendingPointsRef.current =
@@ -3016,8 +2952,7 @@ export default function GameCanvas({
     point,
     event
   ) {
-    const operations =
-      getResolvedOperations()
+    const operations = getResolvedOperations()
 
     let found = null
 
@@ -3031,9 +2966,7 @@ export default function GameCanvas({
         operations[i]
 
       if (
-        hiddenLayers.has(
-          operation.id
-        )
+        operation.hidden
       ) {
         continue
       }
@@ -3231,9 +3164,7 @@ export default function GameCanvas({
           operations[i]
 
         if (
-          hiddenLayers.has(
-            candidate.id
-          )
+          candidate.hidden
         ) {
           continue
         }
@@ -3275,6 +3206,11 @@ export default function GameCanvas({
     renderCanvas(operation.id)
     renderLiveCanvas()
 
+    const editableOperation = prepareEditableOperation(
+      operation,
+      currentTool === TOOLS.CURVE ? "smooth" : "linear"
+    )
+
     /*
      * Anchor editing works against actual points.
      *
@@ -3288,7 +3224,7 @@ export default function GameCanvas({
     ) {
       const index =
         findNearestPointIndex(
-          operation,
+          editableOperation,
           point
         )
 
@@ -3321,7 +3257,7 @@ export default function GameCanvas({
           clonePoint(point),
         changed: false,
         previewOperation:
-          cloneOperation(operation),
+          editableOperation,
       }
 
       beginCanvasEditCapture(event)
@@ -3340,7 +3276,7 @@ export default function GameCanvas({
     ) {
       const index =
         findNearestPointIndex(
-          operation,
+          editableOperation,
           point
         )
 
@@ -3370,12 +3306,36 @@ export default function GameCanvas({
           clonePoint(point),
         changed: false,
         previewOperation:
-          cloneOperation(operation),
+          editableOperation,
       }
 
       beginCanvasEditCapture(event)
 
       return
+    }
+
+    if (currentTool === TOOLS.ROTATE) {
+      const bounds = calculateOperationBounds(editableOperation)
+      if (!bounds || !Array.isArray(editableOperation.points)) return
+
+      const center = [
+        bounds.x + bounds.width / 2,
+        bounds.y + bounds.height / 2,
+      ]
+
+      editRef.current = {
+        type: "rotate",
+        operationId: operation.id,
+        center,
+        startAngle: Math.atan2(point[1] - center[1], point[0] - center[0]),
+        start: clonePoint(point),
+        last: clonePoint(point),
+        changed: false,
+        originalOperation: editableOperation,
+        previewOperation: editableOperation,
+      }
+
+      beginCanvasEditCapture(event)
     }
   }
 
@@ -3535,6 +3495,8 @@ export default function GameCanvas({
 
     if (Array.isArray(updated.points)) {
       updated.points = updated.points.map(movePoint)
+      if (updated.start) updated.start = movePoint(updated.start)
+      if (updated.end) updated.end = movePoint(updated.end)
       updated.bounds = calculateBoundsFromPoints(updated.points)
       return updated
     }
@@ -3625,6 +3587,36 @@ export default function GameCanvas({
       renderLiveCanvas()
       renderOverlay()
 
+      return
+    }
+
+    if (edit.type === "rotate") {
+      const original = edit.originalOperation
+      const center = edit.center
+
+      if (!original || !center || !Array.isArray(original.points)) {
+        return
+      }
+
+      const angle =
+        Math.atan2(point[1] - center[1], point[0] - center[0]) -
+        edit.startAngle
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+      const updated = cloneOperation(original)
+
+      updated.points = original.points.map(([x, y]) => {
+        const dxFromCenter = x - center[0]
+        const dyFromCenter = y - center[1]
+        return [
+          clamp(center[0] + dxFromCenter * cosine - dyFromCenter * sine, 0, 1),
+          clamp(center[1] + dxFromCenter * sine + dyFromCenter * cosine, 0, 1),
+        ]
+      })
+      updated.bounds = calculateBoundsFromPoints(updated.points)
+      edit.previewOperation = updated
+      renderLiveCanvas()
+      renderOverlay()
       return
     }
 
@@ -3887,8 +3879,12 @@ export default function GameCanvas({
   function eraseAtPoint(
     point
   ) {
-    const operations =
-      getResolvedOperations()
+    const eraseEdit = eraseEditRef.current
+    const operations = eraseEdit?.operations
+
+    if (!eraseEdit || !Array.isArray(operations)) {
+      return
+    }
 
     const radius =
       clamp(
@@ -3917,9 +3913,7 @@ export default function GameCanvas({
         operations[i]
 
       if (
-        hiddenLayers.has(
-          operation.id
-        )
+        operation.hidden
       ) {
         continue
       }
@@ -4012,80 +4006,26 @@ export default function GameCanvas({
     original,
     result
   ) {
-    /*
-     * Delete the original object if nothing remains.
-     */
-    if (
-      result.deleted
-    ) {
-      emitObjectDelete(
-        original.id
-      )
+    const eraseEdit = eraseEditRef.current
+    if (!eraseEdit) return
 
-      return
-    }
-
-    /*
-     * Replace original geometry.
-     */
-    const replacement =
-      result.operation
-
-    updateLocalOperation(
-      original.id,
-      replacement
+    const index = eraseEdit.operations.findIndex(
+      (operation) => operation.id === original.id
     )
+    if (index < 0) return
 
-    const update = {
-      id:
-        createStrokeId(),
+    const rootId = original._eraseRootId || original.id
+    const replacements = result.deleted
+      ? []
+      : [result.operation, ...(result.additionalSegments || [])]
+          .filter(Boolean)
+          .map((operation) => ({
+            ...cloneOperation(operation),
+            _eraseRootId: rootId,
+          }))
 
-      type:
-        "object_update",
-
-      objectId:
-        original.id,
-
-      changes:
-        cloneOperation(
-          replacement
-        ),
-    }
-
-    localOperationsRef.current.push(
-      update
-    )
-
-    /*
-     * Additional surviving pieces become new layers.
-     */
-    for (
-      const additional of
-        result.additionalSegments ||
-        []
-    ) {
-      localOperationsRef.current.push(
-        additional
-      )
-
-      if (
-        typeof onStrokeRef.current ===
-        "function"
-      ) {
-        onStrokeRef.current(
-          additional
-        )
-      }
-    }
-
-    if (
-      typeof onStrokeRef.current ===
-      "function"
-    ) {
-      onStrokeRef.current(
-        update
-      )
-    }
+    eraseEdit.operations.splice(index, 1, ...replacements)
+    eraseEdit.changedRoots.add(rootId)
   }
 
   /*
@@ -4453,11 +4393,13 @@ export default function GameCanvas({
       new Set([
         "stroke",
         "eraser",
+        "erase",
         "fill",
         "shape",
         "object_update",
         "object_delete",
         "layer_reorder",
+        "canvas_clear",
       ])
 
     let lastAction = null
@@ -4497,7 +4439,7 @@ export default function GameCanvas({
     for (let i = operations.length - 1; i >= 0; i -= 1) {
       const operation = operations[i]
 
-      if (!operation || hiddenLayers.has(operation.id)) {
+      if (!operation || operation.hidden) {
         continue
       }
 
@@ -4542,15 +4484,8 @@ export default function GameCanvas({
       return
     }
 
-    // Fallback for arbitrary closed raster regions.
-    const operation = {
-      id: createStrokeId(),
-      type: "fill",
-      point: clonePoint(point),
-      color,
-    }
-
-    commitOperation(operation)
+    // Fill is a vector object update. Clicking outside a closed vector object
+    // intentionally does nothing instead of creating a drawer-only raster fill.
   }
 
   /*
@@ -4608,7 +4543,7 @@ export default function GameCanvas({
     )
 
     const operations =
-      getResolvedOperations()
+      eraseEditRef.current?.operations || getResolvedOperations()
 
     const edit = editRef.current
     const previewOperation =
@@ -4620,8 +4555,7 @@ export default function GameCanvas({
     ) {
       if (
         (
-          operation.hidden ||
-          hiddenLayers.has(operation.id)
+          operation.hidden
         ) ||
         operation.id === excludeOperationId
       ) {
@@ -5311,68 +5245,42 @@ export default function GameCanvas({
         CANVAS_HEIGHT
     )
 
-    for (
-      let i = 1;
-      i <
-        points.length - 1;
-      i += 1
-    ) {
-      const current =
-        points[i]
+    if (stroke.pathMode === "linear") {
+      for (let i = 1; i < points.length; i += 1) {
+        context.lineTo(
+          points[i][0] * CANVAS_WIDTH,
+          points[i][1] * CANVAS_HEIGHT
+        )
+      }
+    } else {
+      for (let i = 1; i < points.length - 1; i += 1) {
+        const current = points[i]
+        const next = points[i + 1]
 
-      const next =
-        points[i + 1]
+        context.quadraticCurveTo(
+          current[0] * CANVAS_WIDTH,
+          current[1] * CANVAS_HEIGHT,
+          ((current[0] + next[0]) / 2) * CANVAS_WIDTH,
+          ((current[1] + next[1]) / 2) * CANVAS_HEIGHT
+        )
+      }
 
-      const currentX =
-        current[0] *
-        CANVAS_WIDTH
-
-      const currentY =
-        current[1] *
-        CANVAS_HEIGHT
-
-      const nextX =
-        next[0] *
-        CANVAS_WIDTH
-
-      const nextY =
-        next[1] *
-        CANVAS_HEIGHT
+      const last = points[points.length - 1]
+      const previous = points[points.length - 2]
 
       context.quadraticCurveTo(
-        currentX,
-        currentY,
-        (
-          currentX +
-          nextX
-        ) / 2,
-        (
-          currentY +
-          nextY
-        ) / 2
+        previous[0] * CANVAS_WIDTH,
+        previous[1] * CANVAS_HEIGHT,
+        last[0] * CANVAS_WIDTH,
+        last[1] * CANVAS_HEIGHT
       )
     }
 
-    const last =
-      points[
-        points.length - 1
-      ]
-
-    const previous =
-      points[
-        points.length - 2
-      ]
-
-    context.quadraticCurveTo(
-      previous[0] *
-        CANVAS_WIDTH,
-      previous[1] *
-        CANVAS_HEIGHT,
-      last[0] *
-        CANVAS_WIDTH,
-      last[1] *
-        CANVAS_HEIGHT
-    )
+    if (stroke.closed && stroke.fill) {
+      context.closePath()
+      context.fillStyle = stroke.fill
+      context.fill()
+    }
 
     context.stroke()
 
@@ -5554,16 +5462,6 @@ export default function GameCanvas({
     const nextHidden =
       !Boolean(operation.hidden)
 
-    setHiddenLayers((current) => {
-      const next = new Set(current)
-      if (nextHidden) {
-        next.add(operationId)
-      } else {
-        next.delete(operationId)
-      }
-      return next
-    })
-
     const update = {
       id: createStrokeId(),
       type: "object_update",
@@ -5704,7 +5602,9 @@ export default function GameCanvas({
       nextTool !==
         TOOLS.ANCHOR &&
       nextTool !==
-        TOOLS.CURVE
+        TOOLS.CURVE &&
+      nextTool !==
+        TOOLS.ROTATE
     ) {
       setSelectedAnchorIndex(
         null
@@ -5783,6 +5683,12 @@ export default function GameCanvas({
     )
   }
 
+  function selectRotate() {
+    chooseTool(
+      TOOLS.ROTATE
+    )
+  }
+
   /*
    * -------------------------------------------------------------------------
    * Pointer handler patch
@@ -5857,7 +5763,8 @@ export default function GameCanvas({
     isDesktopPointer &&
     tool !== TOOLS.SELECT &&
     tool !== TOOLS.ANCHOR &&
-    tool !== TOOLS.CURVE
+    tool !== TOOLS.CURVE &&
+    tool !== TOOLS.ROTATE
 
   const showSelectCursor =
     canDraw &&
@@ -5886,6 +5793,8 @@ export default function GameCanvas({
       ? "Anchor"
       : tool === TOOLS.CURVE
         ? "Curve"
+        : tool === TOOLS.ROTATE
+          ? "Rotate"
         : "Edit"
 
   /*
@@ -6323,6 +6232,15 @@ export default function GameCanvas({
                   >
                     <Waves size={16} />
                     Curve
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectRotate}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <RotateCcw size={16} />
+                    Rotate
                   </button>
                 </div>
               )}
@@ -6782,10 +6700,7 @@ export default function GameCanvas({
                     selectedOperationId
 
                   const hidden =
-                    Boolean(operation.hidden) ||
-                    hiddenLayers.has(
-                      operation.id
-                    )
+                    Boolean(operation.hidden)
 
                   const label =
                     operation.type ===

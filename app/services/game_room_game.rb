@@ -26,6 +26,10 @@ class GameRoomGame
     new(game_room, player).update_object!(operation)
   end
 
+  def self.reorder_layers!(game_room, player, operation)
+    new(game_room, player).reorder_layers!(operation)
+  end
+
   def self.delete_object!(game_room, player, operation)
     new(game_room, player).delete_object!(operation)
   end
@@ -34,8 +38,8 @@ class GameRoomGame
     new(game_room, player).undo_stroke!(stroke_id)
   end
 
-  def self.clear_canvas!(game_room, player)
-    new(game_room, player).clear_canvas!
+  def self.clear_canvas!(game_room, player, operation)
+    new(game_room, player).clear_canvas!(operation)
   end
 
   def self.play_again!(game_room, player)
@@ -763,6 +767,27 @@ def draw_stroke!(stroke)
 
     strokes = Array(round.strokes)
 
+    if stroke["type"] == "erase"
+      active_ids = active_drawable_ids(strokes)
+      erased_ids = stroke["changes"].map { |change| change["objectId"] }
+
+      unless erased_ids.all? { |object_id| active_ids.include?(object_id) }
+        raise Error, "Drawing object no longer exists."
+      end
+
+      after_ids = stroke["changes"].flat_map do |change|
+        change["after"].map { |object| object["id"].to_s }
+      end
+
+      if after_ids.any?(&:blank?) || after_ids.uniq.length != after_ids.length
+        raise Error, "Invalid erased object geometry."
+      end
+
+      if (after_ids & (active_ids - erased_ids)).any?
+        raise Error, "Invalid erased object geometry."
+      end
+    end
+
     # --------------------------------------------------------------------------
     # Idempotency
     # --------------------------------------------------------------------------
@@ -789,10 +814,7 @@ def reorder_layers!(operation)
     operation = normalize_layer_reorder(operation)
     strokes = Array(round.strokes)
 
-    drawable_ids = strokes
-      .select { |item| !%w[layer_reorder object_update object_delete].include?(item["type"].to_s) }
-      .map { |item| item["id"].to_s }
-      .reject(&:blank?)
+    drawable_ids = active_drawable_ids(strokes)
 
     requested = operation["order"].map(&:to_s)
     order = requested.select { |id| drawable_ids.include?(id) }
@@ -823,9 +845,7 @@ def update_object!(operation)
     operation = normalize_object_update(operation)
     strokes = Array(round.strokes)
 
-    object_exists = strokes.any? do |existing|
-      existing["id"].to_s == operation["objectId"]
-    end
+    object_exists = active_drawable_ids(strokes).include?(operation["objectId"])
 
     unless object_exists
       raise Error, "Drawing object no longer exists."
@@ -853,9 +873,7 @@ def delete_object!(operation)
     operation = normalize_object_delete(operation)
     strokes = Array(round.strokes)
 
-    object_exists = strokes.any? do |existing|
-      existing["id"].to_s == operation["objectId"]
-    end
+    object_exists = active_drawable_ids(strokes).include?(operation["objectId"])
 
     unless object_exists
       raise Error, "Drawing object no longer exists."
@@ -883,7 +901,12 @@ def undo_stroke!(stroke_id)
     strokes = Array(round.strokes)
     target_id = stroke_id.to_s
 
-    unless strokes.any? { |stroke| stroke["id"].to_s == target_id }
+    undoable_types = %w[stroke shape fill eraser erase object_update object_delete layer_reorder canvas_clear]
+    latest_action = strokes.reverse.find do |stroke|
+      undoable_types.include?(stroke["type"].to_s)
+    end
+
+    unless latest_action && latest_action["id"].to_s == target_id
       raise Error, "Nothing to undo."
     end
 
@@ -898,7 +921,7 @@ def undo_stroke!(stroke_id)
   round
 end
 
-def clear_canvas!
+def clear_canvas!(operation)
   round = nil
 
   @game_room.with_lock do
@@ -908,13 +931,35 @@ def clear_canvas!
       raise Error, "Only the drawer can clear the canvas."
     end
 
-    round.update!(strokes: [])
+    operation = normalize_canvas_clear(operation)
+    strokes = Array(round.strokes)
+
+    unless strokes.any? { |existing| existing["id"].to_s == operation["id"] }
+      if active_drawable_ids(strokes).empty?
+        raise Error, "Nothing to clear."
+      end
+
+      strokes << operation
+      round.update!(strokes: strokes)
+    end
   end
 
   round
 end
 
 private
+
+def normalize_canvas_clear(operation)
+  operation = operation.to_h.stringify_keys
+  id = operation["id"].to_s.first(100)
+
+  raise Error, "Invalid clear operation ID." if id.blank?
+
+  {
+    "id" => id,
+    "type" => "canvas_clear"
+  }
+end
 
 def normalize_layer_reorder(operation)
   operation = operation.to_h.stringify_keys
@@ -953,7 +998,7 @@ def normalize_object_update(operation)
     raise Error, "Invalid drawing update."
   end
 
-  allowed = %w[points bounds color width shape start end pen closed type fill hidden]
+  allowed = %w[points bounds color width shape start end pen closed type fill hidden pathMode]
   changes = changes.slice(*allowed)
 
   normalized = {
@@ -1040,6 +1085,14 @@ def normalize_object_update(operation)
     raise Error, "Invalid drawing shape."
   end
 
+  if normalized["changes"].key?("pathMode")
+    path_mode = normalized["changes"]["pathMode"].to_s
+    unless %w[linear smooth].include?(path_mode)
+      raise Error, "Invalid drawing path mode."
+    end
+    normalized["changes"]["pathMode"] = path_mode
+  end
+
   normalized
 end
 
@@ -1069,7 +1122,7 @@ def normalize_stroke(stroke)
 
   type = "stroke" if type.blank?
 
-  unless %w[stroke eraser fill shape].include?(type)
+  unless %w[stroke eraser fill shape erase].include?(type)
     raise Error, "Invalid drawing operation."
   end
 
@@ -1083,6 +1136,38 @@ def normalize_stroke(stroke)
   # --------------------------------------------------------------------------
   # Vector shape
   # --------------------------------------------------------------------------
+
+  if type == "erase"
+    changes = Array(stroke["changes"]).first(500).map do |change|
+      change = change.to_h.stringify_keys
+      object_id = change["objectId"].to_s.first(100)
+      raise Error, "Invalid erased object ID." if object_id.blank?
+
+      after = Array(change["after"]).first(500).map do |object|
+        normalized_object = normalize_stroke(object)
+        unless %w[stroke shape].include?(normalized_object["type"])
+          raise Error, "Invalid erased object geometry."
+        end
+        normalized_object
+      end
+
+      {
+        "objectId" => object_id,
+        "after" => after
+      }
+    end
+
+    raise Error, "Invalid erase operation." if changes.empty?
+
+    object_ids = changes.map { |change| change["objectId"] }
+    raise Error, "Invalid erase operation." unless object_ids.uniq.length == object_ids.length
+
+    return {
+      "id" => id,
+      "type" => "erase",
+      "changes" => changes
+    }
+  end
 
   if type == "shape"
     shape = stroke["shape"].to_s
@@ -1166,6 +1251,19 @@ def normalize_stroke(stroke)
             [bx, by],
             [bx + bw, by + bh]
           ]
+        when "circle"
+          center_x = bx + bw / 2.0
+          center_y = by + bh / 2.0
+          radius_x = bw / 2.0
+          radius_y = bh / 2.0
+
+          (0..48).map do |index|
+            angle = index.fdiv(48) * Math::PI * 2
+            [
+              center_x + Math.cos(angle) * radius_x,
+              center_y + Math.sin(angle) * radius_y
+            ]
+          end
         else
           [
             [bx, by],
@@ -1253,7 +1351,7 @@ def normalize_stroke(stroke)
       "#18181b"
     end
 
-  {
+  normalized = {
     "id" => id,
     "type" => type,
     "points" => points,
@@ -1267,6 +1365,39 @@ def normalize_stroke(stroke)
         nil
     )
   }
+
+  path_mode = stroke["pathMode"].to_s
+  normalized["pathMode"] = path_mode if %w[linear smooth].include?(path_mode)
+  normalized
+end
+
+def active_drawable_ids(strokes)
+  ids = []
+
+  Array(strokes).each do |operation|
+    operation = operation.to_h.stringify_keys
+
+    case operation["type"].to_s
+    when "canvas_clear"
+      ids.clear
+    when "object_delete"
+      ids.delete(operation["objectId"].to_s)
+    when "erase"
+      Array(operation["changes"]).each do |change|
+        change = change.to_h.stringify_keys
+        ids.delete(change["objectId"].to_s)
+        Array(change["after"]).each do |object|
+          object_id = object.to_h.stringify_keys["id"].to_s
+          ids << object_id if object_id.present? && !ids.include?(object_id)
+        end
+      end
+    when "stroke", "shape", "fill"
+      operation_id = operation["id"].to_s
+      ids << operation_id if operation_id.present? && !ids.include?(operation_id)
+    end
+  end
+
+  ids
 end
 
 def current_round!

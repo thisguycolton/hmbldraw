@@ -563,6 +563,7 @@ useEffect(() => {
 
           setSelectedWord(null)
           setGameError(null)
+          setLiveStrokes({})
           replaceStrokes([])
           replaceGuesses([])
           setCorrectGuesser(null)
@@ -592,6 +593,7 @@ useEffect(() => {
           setReadyPlayerIds([])
           setIsReady(false)
           setWordOptions([])
+          setLiveStrokes({})
 
           replaceStrokes(
             Array.isArray(data.round?.strokes)
@@ -809,6 +811,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(roundId, data.strokes)
+            return
+          }
+
           // The drawer optimistically inserts the operation before Rails
           // broadcasts the canonical persisted version. Replace that
           // optimistic copy when the server echo arrives so fields such as
@@ -856,6 +864,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
+
           if (current.some((existing) => existing?.id === operation.id)) {
             return
           }
@@ -882,6 +896,12 @@ useEffect(() => {
           }
 
           const current = strokesRef.current
+
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
 
           if (current.some((existing) => existing?.id === operation.id)) {
             return
@@ -918,6 +938,12 @@ useEffect(() => {
           }
 
           const current = strokesRef.current
+
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
 
           const next = current.filter(
             (stroke) =>
@@ -965,6 +991,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
+
           if (
             current.some(
               (existing) => existing?.id === operation.id
@@ -1002,12 +1034,17 @@ useEffect(() => {
             return
           }
 
-          strokesRef.current = []
-          setStrokes([])
+          const next = Array.isArray(data.strokes)
+            ? data.strokes
+            : data.operation?.id
+              ? [...strokesRef.current, data.operation]
+              : []
+
+          replaceStrokes(next)
 
           recordRoundStrokes(
             data.round?.id,
-            []
+            next
           )
 
           return
@@ -1033,6 +1070,7 @@ useEffect(() => {
         // --------------------------------------------------------------
 
         if (data.type === "round_ended") {
+          setLiveStrokes({})
           console.log("[Game] Round ended:", data)
 
           const round = data.round
@@ -1448,13 +1486,26 @@ function sendLiveStroke(data) {
   )
 }
 
-  function clearCanvas() {
+  function clearCanvas(operation) {
     if (!subscriptionRef.current) {
       return
     }
 
+    if (!operation?.id || operation.type !== "canvas_clear") {
+      return
+    }
+
+    const current = strokesRef.current
+
+    if (!current.some((existing) => existing?.id === operation.id)) {
+      const next = [...current, operation]
+      replaceStrokes(next)
+      recordRoundStrokes(currentRoundRef.current?.id, next)
+    }
+
     subscriptionRef.current.perform(
-      "clear_canvas"
+      "clear_canvas",
+      operation
     )
   }
 

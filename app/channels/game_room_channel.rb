@@ -310,7 +310,17 @@ def draw_stroke(data)
   # Validate operation-specific payload
   # --------------------------------------------------------------------------
 
-  if stroke[:type] == "fill"
+  if stroke[:type] == "erase"
+    if Array(stroke[:changes]).empty?
+      transmit(
+        {
+          type: "game_error",
+          message: "Invalid erase operation."
+        }
+      )
+      return
+    end
+  elsif stroke[:type] == "fill"
     point = Array(stroke[:point])
 
     unless point.length == 2
@@ -399,7 +409,8 @@ def draw_stroke(data)
         id: round.id,
         number: round.number
       },
-      stroke: saved_stroke
+      stroke: saved_stroke,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -458,7 +469,8 @@ def reorder_layers(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -505,7 +517,8 @@ def update_object(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -515,6 +528,7 @@ rescue StandardError => e
   Rails.logger.error(
     "[GameRoomChannel] update_object failed: #{e.class}: #{e.message}"
   )
+  Rails.logger.error(e.backtrace.first(10).join("\n"))
   transmit(type: "game_error", message: "Unable to update that drawing object.")
 end
 
@@ -547,7 +561,8 @@ def delete_object(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -557,6 +572,7 @@ rescue StandardError => e
   Rails.logger.error(
     "[GameRoomChannel] delete_object failed: #{e.class}: #{e.message}"
   )
+  Rails.logger.error(e.backtrace.first(10).join("\n"))
   transmit(type: "game_error", message: "Unable to delete that drawing object.")
 end
 
@@ -602,7 +618,8 @@ def undo_stroke(data)
         id: round.id,
         number: round.number
       },
-      stroke_id: stroke_id
+      stroke_id: stroke_id,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -636,7 +653,9 @@ end
   # Clear canvas
   # --------------------------------------------------------------------------
 
-  def clear_canvas
+  def clear_canvas(data = {})
+  operation = sanitize_canvas_clear(data)
+
   # --------------------------------------------------------------
   # Clear the authoritative persisted drawing.
   # --------------------------------------------------------------
@@ -644,7 +663,8 @@ end
   round =
     GameRoomGame.clear_canvas!(
       @game_room,
-      @player
+      @player,
+      operation
     )
 
   # --------------------------------------------------------------
@@ -658,7 +678,9 @@ end
       round: {
         id: round.id,
         number: round.number
-      }
+      },
+      operation: operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -1182,6 +1204,18 @@ end
     }
   end
 
+  def sanitize_canvas_clear(data)
+    data = data.to_h.stringify_keys
+    id = data["id"].to_s.first(100)
+
+    raise GameRoomGame::Error, "Invalid clear operation ID." if id.blank?
+
+    {
+      id: id,
+      type: "canvas_clear"
+    }
+  end
+
   # --------------------------------------------------------------------------
   # Sanitize vector editor operations
   # --------------------------------------------------------------------------
@@ -1196,7 +1230,7 @@ end
     raise GameRoomGame::Error, "Invalid drawing object ID." if object_id.blank?
     raise GameRoomGame::Error, "Invalid drawing update." unless changes.is_a?(Hash)
 
-    allowed = %w[points bounds color width shape start end pen closed type fill hidden]
+    allowed = %w[points bounds color width shape start end pen closed type fill hidden pathMode]
     changes = changes.stringify_keys.slice(*allowed)
 
     if changes["points"]
@@ -1261,6 +1295,14 @@ end
       raise GameRoomGame::Error, "Invalid drawing shape."
     end
 
+    if changes.key?("pathMode")
+      path_mode = changes["pathMode"].to_s
+      unless %w[linear smooth].include?(path_mode)
+        raise GameRoomGame::Error, "Invalid drawing path mode."
+      end
+      changes["pathMode"] = path_mode
+    end
+
     { id: id, type: "object_update", objectId: object_id, changes: changes }
   end
 
@@ -1295,7 +1337,7 @@ end
   raise GameRoomGame::Error,
         "Invalid drawing operation ID." if id.blank?
 
-  unless %w[stroke eraser fill shape].include?(type)
+  unless %w[stroke eraser fill shape erase].include?(type)
     raise GameRoomGame::Error,
           "Invalid drawing operation."
   end
@@ -1303,6 +1345,40 @@ end
   # --------------------------------------------------------------------------
   # Shape
   # --------------------------------------------------------------------------
+
+  if type == "erase"
+    changes = Array(data["changes"]).first(500).map do |change|
+      change = change.to_h.stringify_keys
+      object_id = change["objectId"].to_s.first(100)
+      raise GameRoomGame::Error, "Invalid erased object ID." if object_id.blank?
+
+      after = Array(change["after"]).first(500).map do |object|
+        normalized_object = sanitize_stroke(object)
+        unless %w[stroke shape].include?(normalized_object[:type])
+          raise GameRoomGame::Error, "Invalid erased object geometry."
+        end
+        normalized_object
+      end
+
+      {
+        objectId: object_id,
+        after: after
+      }
+    end
+
+    raise GameRoomGame::Error, "Invalid erase operation." if changes.empty?
+
+    object_ids = changes.map { |change| change[:objectId] }
+    unless object_ids.uniq.length == object_ids.length
+      raise GameRoomGame::Error, "Invalid erase operation."
+    end
+
+    return {
+      id: id,
+      type: "erase",
+      changes: changes
+    }
+  end
 
   if type == "shape"
     shape = data["shape"].to_s
@@ -1460,7 +1536,7 @@ end
       .to_s
       .first(100)
 
-  {
+  normalized = {
     id: id,
     type: type,
     points: points,
@@ -1474,5 +1550,9 @@ end
         nil
     )
   }
+
+  path_mode = data["pathMode"].to_s
+  normalized[:pathMode] = path_mode if %w[linear smooth].include?(path_mode)
+  normalized
 end
 end
