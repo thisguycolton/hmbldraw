@@ -322,6 +322,16 @@ def draw_stroke(data)
       )
       return
     end
+  elsif stroke[:type] == "shape"
+    unless stroke[:shape].present? && stroke[:bounds].is_a?(Hash)
+      transmit(
+        {
+          type: "game_error",
+          message: "Invalid shape."
+        }
+      )
+      return
+    end
   elsif Array(stroke[:points]).empty?
     transmit(
       {
@@ -335,6 +345,20 @@ def draw_stroke(data)
   # --------------------------------------------------------------------------
   # Persist the operation
   # --------------------------------------------------------------------------
+
+  live_round = live_drawing_round!
+
+  deadline =
+    live_round.started_at +
+    @game_room.round_duration.seconds
+
+  if Time.current >= deadline
+    transmit(
+      type: "game_error",
+      message: "Time is up."
+    )
+    return
+  end
 
   round =
     GameRoomGame.draw_stroke!(
@@ -352,7 +376,16 @@ def draw_stroke(data)
       existing["id"].to_s == stroke[:id].to_s
     end
 
-  return unless saved_stroke
+  unless saved_stroke
+    Rails.logger.warn(
+      "[GameRoomChannel] draw_stroke persisted operation not found: "       "id=#{stroke[:id]}"
+    )
+    return
+  end
+
+  Rails.logger.debug(
+    "[GameRoomChannel] persisted stroke id=#{saved_stroke["id"]} "     "type=#{saved_stroke["type"]} pen=#{saved_stroke["pen"]} "     "closed=#{saved_stroke["closed"]} fill=#{saved_stroke["fill"].inspect}"
+  )
 
   # --------------------------------------------------------------------------
   # Broadcast to everyone in the room
@@ -394,6 +427,137 @@ rescue StandardError => e
       message: "Unable to save that stroke."
     }
   )
+end
+
+# --------------------------------------------------------------------------
+# Reorder layers
+# --------------------------------------------------------------------------
+
+def reorder_layers(data)
+  operation = sanitize_layer_reorder(data)
+
+  round =
+    GameRoomGame.reorder_layers!(
+      @game_room,
+      @player,
+      operation
+    )
+
+  saved_operation =
+    Array(round.strokes).find do |existing|
+      existing["id"].to_s == operation[:id].to_s
+    end
+
+  return unless saved_operation
+
+  ActionCable.server.broadcast(
+    "game_room:#{@game_room.id}",
+    {
+      type: "layer_reordered",
+      round: {
+        id: round.id,
+        number: round.number
+      },
+      operation: saved_operation
+    }
+  )
+
+rescue GameRoomGame::Error => e
+  transmit(type: "game_error", message: e.message)
+rescue StandardError => e
+  Rails.logger.error(
+    "[GameRoomChannel] reorder_layers failed: #{e.class}: #{e.message}"
+  )
+  Rails.logger.error(e.backtrace.first(10).join("\n"))
+  transmit(
+    type: "game_error",
+    message: "Unable to reorder layers."
+  )
+end
+
+# --------------------------------------------------------------------------
+# Update vector object
+
+# --------------------------------------------------------------------------
+
+def update_object(data)
+  operation = sanitize_object_update(data)
+
+  round =
+    GameRoomGame.update_object!(
+      @game_room,
+      @player,
+      operation
+    )
+
+  saved_operation =
+    Array(round.strokes).find do |existing|
+      existing["id"].to_s == operation[:id].to_s
+    end
+
+  return unless saved_operation
+
+  ActionCable.server.broadcast(
+    "game_room:#{@game_room.id}",
+    {
+      type: "object_updated",
+      round: {
+        id: round.id,
+        number: round.number
+      },
+      operation: saved_operation
+    }
+  )
+
+rescue GameRoomGame::Error => e
+  transmit(type: "game_error", message: e.message)
+rescue StandardError => e
+  Rails.logger.error(
+    "[GameRoomChannel] update_object failed: #{e.class}: #{e.message}"
+  )
+  transmit(type: "game_error", message: "Unable to update that drawing object.")
+end
+
+# --------------------------------------------------------------------------
+# Delete vector object
+# --------------------------------------------------------------------------
+
+def delete_object(data)
+  operation = sanitize_object_delete(data)
+
+  round =
+    GameRoomGame.delete_object!(
+      @game_room,
+      @player,
+      operation
+    )
+
+  saved_operation =
+    Array(round.strokes).find do |existing|
+      existing["id"].to_s == operation[:id].to_s
+    end
+
+  return unless saved_operation
+
+  ActionCable.server.broadcast(
+    "game_room:#{@game_room.id}",
+    {
+      type: "object_deleted",
+      round: {
+        id: round.id,
+        number: round.number
+      },
+      operation: saved_operation
+    }
+  )
+
+rescue GameRoomGame::Error => e
+  transmit(type: "game_error", message: e.message)
+rescue StandardError => e
+  Rails.logger.error(
+    "[GameRoomChannel] delete_object failed: #{e.class}: #{e.message}"
+  )
+  transmit(type: "game_error", message: "Unable to delete that drawing object.")
 end
 
 # --------------------------------------------------------------------------
@@ -868,6 +1032,7 @@ end
 end
 
  def sanitize_live_stroke(data)
+  data = data.to_h.stringify_keys
   type = data["type"].to_s
 
   unless %w[start points].include?(type)
@@ -882,60 +1047,99 @@ end
           "Invalid live stroke."
   end
 
-  operation_type =
-    raw_stroke["type"].to_s
+  operation_type = raw_stroke["type"].to_s
+  operation_type = "stroke" if operation_type.blank?
 
-  operation_type =
-    "stroke" if operation_type.blank?
-
-  unless %w[stroke eraser].include?(operation_type)
+  unless %w[stroke eraser shape].include?(operation_type)
     raise GameRoomGame::Error,
           "Invalid live drawing operation."
+  end
+
+  color = raw_stroke["color"].to_s
+  color = color.match?(/\A#[0-9a-fA-F]{6}\z/) ? color : "#18181b"
+  width = raw_stroke["width"].to_f.clamp(1.0, 30.0)
+  id = raw_stroke["id"].to_s.first(100)
+
+  raise GameRoomGame::Error, "Invalid stroke ID." if id.blank?
+
+  if operation_type == "shape"
+    shape = raw_stroke["shape"].to_s
+    unless %w[line circle square triangle].include?(shape)
+      raise GameRoomGame::Error, "Invalid live shape."
+    end
+
+    bounds = raw_stroke["bounds"]
+    unless bounds.is_a?(Hash)
+      raise GameRoomGame::Error, "Invalid live shape bounds."
+    end
+
+    bounds = bounds.stringify_keys
+    x = Float(bounds["x"]) rescue nil
+    y = Float(bounds["y"]) rescue nil
+    width_value = Float(bounds["width"]) rescue nil
+    height_value = Float(bounds["height"]) rescue nil
+
+    unless x && y && width_value && height_value
+      raise GameRoomGame::Error, "Invalid live shape bounds."
+    end
+
+    stroke = {
+      id: id,
+      type: "shape",
+      shape: shape,
+      bounds: {
+        x: x.clamp(0.0, 1.0),
+        y: y.clamp(0.0, 1.0),
+        width: width_value.clamp(0.0, 1.0),
+        height: height_value.clamp(0.0, 1.0)
+      },
+      color: color,
+      width: width,
+      fill: (raw_stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ? raw_stroke["fill"].to_s : nil)
+    }
+
+    shape_points =
+      Array(raw_stroke["points"])
+        .first(500)
+        .filter_map do |point|
+          next unless point.is_a?(Array) && point.length == 2
+
+          px = Float(point[0]) rescue nil
+          py = Float(point[1]) rescue nil
+
+          next unless px && py
+
+          [
+            px.clamp(0.0, 1.0),
+            py.clamp(0.0, 1.0)
+          ]
+        end
+
+    stroke[:points] =
+      shape_points if shape_points.length >= 2
+
+    %w[start end].each do |key|
+      next unless raw_stroke[key].is_a?(Array) && raw_stroke[key].length == 2
+      sx = Float(raw_stroke[key][0]) rescue nil
+      sy = Float(raw_stroke[key][1]) rescue nil
+      stroke[key] = [sx.clamp(0.0, 1.0), sy.clamp(0.0, 1.0)] if sx && sy
+    end
+
+    return { type: type, stroke: stroke }
   end
 
   points =
     Array(raw_stroke["points"])
       .first(500)
       .filter_map do |point|
-        next unless point.is_a?(Array)
-        next unless point.length == 2
-
+        next unless point.is_a?(Array) && point.length == 2
         x = Float(point[0]) rescue nil
         y = Float(point[1]) rescue nil
-
         next unless x && y
-
-        [
-          x.clamp(0.0, 1.0),
-          y.clamp(0.0, 1.0)
-        ]
+        [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]
       end
 
-  color =
-    raw_stroke["color"].to_s
-
-  color =
-    if color.match?(/\A#[0-9a-fA-F]{6}\z/)
-      color
-    else
-      "#18181b"
-    end
-
-  width =
-    raw_stroke["width"]
-      .to_f
-      .clamp(1.0, 30.0)
-
-  id =
-    raw_stroke["id"]
-      .to_s
-      .first(100)
-
-  raise GameRoomGame::Error,
-        "Invalid stroke ID." if id.blank?
-
-  raise GameRoomGame::Error,
-        "Invalid stroke points." if points.empty?
+  raise GameRoomGame::Error, "Invalid stroke points." if points.empty?
 
   {
     type: type,
@@ -944,12 +1148,132 @@ end
       type: operation_type,
       points: points,
       color: color,
-      width: width
+      width: width,
+      pen: !!raw_stroke["pen"],
+      closed: !!raw_stroke["closed"],
+      fill: (raw_stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ? raw_stroke["fill"].to_s : nil)
     }
   }
 end
 
 
+
+  # --------------------------------------------------------------------------
+  # Sanitize layer reorder operation
+  # --------------------------------------------------------------------------
+
+  def sanitize_layer_reorder(data)
+    data = data.to_h.stringify_keys
+    id = data["id"].to_s.first(100)
+    order =
+      Array(data["order"])
+        .first(500)
+        .map { |value| value.to_s.first(100) }
+        .select(&:present?)
+        .uniq
+
+    raise GameRoomGame::Error, "Invalid layer operation ID." if id.blank?
+    raise GameRoomGame::Error, "Invalid layer order." if order.empty?
+
+    {
+      id: id,
+      type: "layer_reorder",
+      order: order
+    }
+  end
+
+  # --------------------------------------------------------------------------
+  # Sanitize vector editor operations
+  # --------------------------------------------------------------------------
+
+  def sanitize_object_update(data)
+    data = data.to_h.stringify_keys
+    id = data["id"].to_s.first(100)
+    object_id = data["objectId"].to_s.first(100)
+    changes = data["changes"]
+
+    raise GameRoomGame::Error, "Invalid drawing operation ID." if id.blank?
+    raise GameRoomGame::Error, "Invalid drawing object ID." if object_id.blank?
+    raise GameRoomGame::Error, "Invalid drawing update." unless changes.is_a?(Hash)
+
+    allowed = %w[points bounds color width shape start end pen closed type fill hidden]
+    changes = changes.stringify_keys.slice(*allowed)
+
+    if changes["points"]
+      changes["points"] = Array(changes["points"]).first(5000).filter_map do |point|
+        next unless point.is_a?(Array) && point.length == 2
+        x = Float(point[0]) rescue nil
+        y = Float(point[1]) rescue nil
+        next unless x && y
+        [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]
+      end
+    end
+
+    if changes["bounds"].is_a?(Hash)
+      bounds = changes["bounds"].stringify_keys
+      x = Float(bounds["x"]) rescue 0.0
+      y = Float(bounds["y"]) rescue 0.0
+      width_value = Float(bounds["width"]) rescue 0.0
+      height_value = Float(bounds["height"]) rescue 0.0
+      changes["bounds"] = {
+        "x" => x.clamp(0.0, 1.0),
+        "y" => y.clamp(0.0, 1.0),
+        "width" => width_value.clamp(0.0, 1.0),
+        "height" => height_value.clamp(0.0, 1.0)
+      }
+    end
+
+    %w[start end].each do |key|
+      next unless changes[key].is_a?(Array) && changes[key].length == 2
+      x = Float(changes[key][0]) rescue nil
+      y = Float(changes[key][1]) rescue nil
+      changes[key] = x && y ? [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)] : nil
+    end
+
+    if changes.key?("color")
+      color = changes["color"].to_s
+      changes["color"] = color.match?(/\A#[0-9a-fA-F]{6}\z/) ? color : "#18181b"
+    end
+
+    changes["width"] = changes["width"].to_f.clamp(1.0, 30.0) if changes.key?("width")
+
+    if changes.key?("type") && !%w[stroke shape].include?(changes["type"].to_s)
+      raise GameRoomGame::Error, "Invalid drawing update type."
+    end
+
+    changes["pen"] = !!changes["pen"] if changes.key?("pen")
+    changes["closed"] = !!changes["closed"] if changes.key?("closed")
+    changes["hidden"] = !!changes["hidden"] if changes.key?("hidden")
+
+    if changes.key?("fill")
+      fill = changes["fill"].to_s
+      changes["fill"] =
+        if fill.blank?
+          nil
+        elsif fill.match?(%r{\A#[0-9a-fA-F]{6}\z})
+          fill
+        else
+          "#18181b"
+        end
+    end
+
+    if changes.key?("shape") && !%w[line circle square triangle].include?(changes["shape"].to_s)
+      raise GameRoomGame::Error, "Invalid drawing shape."
+    end
+
+    { id: id, type: "object_update", objectId: object_id, changes: changes }
+  end
+
+  def sanitize_object_delete(data)
+    data = data.to_h.stringify_keys
+    id = data["id"].to_s.first(100)
+    object_id = data["objectId"].to_s.first(100)
+
+    raise GameRoomGame::Error, "Invalid drawing operation ID." if id.blank?
+    raise GameRoomGame::Error, "Invalid drawing object ID." if object_id.blank?
+
+    { id: id, type: "object_delete", objectId: object_id }
+  end
 
   # --------------------------------------------------------------------------
   # Sanitize drawing data
@@ -963,16 +1287,92 @@ end
 
   type = "stroke" if type.blank?
 
-  unless %w[stroke eraser fill].include?(type)
+  id =
+    data["id"]
+      .to_s
+      .first(100)
+
+  raise GameRoomGame::Error,
+        "Invalid drawing operation ID." if id.blank?
+
+  unless %w[stroke eraser fill shape].include?(type)
     raise GameRoomGame::Error,
           "Invalid drawing operation."
   end
 
   # --------------------------------------------------------------------------
-  # Fill
+  # Shape
   # --------------------------------------------------------------------------
 
-  if type == "fill"
+  if type == "shape"
+    shape = data["shape"].to_s
+    unless %w[line circle square triangle].include?(shape)
+      raise GameRoomGame::Error, "Invalid shape."
+    end
+
+    bounds = data["bounds"]
+    unless bounds.is_a?(Hash)
+      raise GameRoomGame::Error, "Invalid shape bounds."
+    end
+
+    bounds = bounds.stringify_keys
+    x = Float(bounds["x"]) rescue nil
+    y = Float(bounds["y"]) rescue nil
+    width_value = Float(bounds["width"]) rescue nil
+    height_value = Float(bounds["height"]) rescue nil
+
+    unless x && y && width_value && height_value
+      raise GameRoomGame::Error, "Invalid shape bounds."
+    end
+
+    color = data["color"].to_s
+    color = color.match?(/\A#[0-9a-fA-F]{6}\z/) ? color : "#18181b"
+
+    normalized = {
+      id: id,
+      type: "shape",
+      shape: shape,
+      bounds: {
+        x: x.clamp(0.0, 1.0),
+        y: y.clamp(0.0, 1.0),
+        width: width_value.clamp(0.0, 1.0),
+        height: height_value.clamp(0.0, 1.0)
+      },
+      color: color,
+      width: data["width"].to_f.clamp(1.0, 30.0),
+      fill: (data["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ? data["fill"].to_s : nil)
+    }
+
+    # Preserve concrete geometry generated by GameCanvas.
+    shape_points =
+      Array(data["points"])
+        .first(5000)
+        .filter_map do |point|
+          next unless point.is_a?(Array) && point.length == 2
+
+          px = Float(point[0]) rescue nil
+          py = Float(point[1]) rescue nil
+
+          next unless px && py
+
+          [
+            px.clamp(0.0, 1.0),
+            py.clamp(0.0, 1.0)
+          ]
+        end
+
+    normalized[:points] =
+      shape_points if shape_points.length >= 2
+
+    %w[start end].each do |key|
+      next unless data[key].is_a?(Array) && data[key].length == 2
+      sx = Float(data[key][0]) rescue nil
+      sy = Float(data[key][1]) rescue nil
+      normalized[key] = [sx.clamp(0.0, 1.0), sy.clamp(0.0, 1.0)] if sx && sy
+    end
+
+    return normalized
+  elsif type == "fill"
     point =
       Array(data["point"])
 
@@ -1065,7 +1465,14 @@ end
     type: type,
     points: points,
     color: color,
-    width: width
+    width: width,
+    pen: !!data["pen"],
+    closed: !!data["closed"],
+    fill: (
+      data["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ?
+        data["fill"].to_s :
+        nil
+    )
   }
 end
 end

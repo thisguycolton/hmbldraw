@@ -288,7 +288,20 @@ useEffect(() => {
     return
   }
 
-  if (gameState !== "drawing") {
+  /*
+   * The fixed, full-screen drawing experience is mobile-only.
+   *
+   * The previous version locked html/body overflow for every drawing round.
+   * On desktop that prevented the normal GameWorkspace page from scrolling,
+   * so a square canvas could extend below the viewport and become impossible
+   * to reach. Keep the viewport lock only for touch/coarse-pointer devices.
+   */
+  const isTouchDevice =
+    window.matchMedia(
+      "(hover: none) and (pointer: coarse)"
+    ).matches
+
+  if (gameState !== "drawing" || !isTouchDevice) {
     document.documentElement.style.overflow = ""
     document.body.style.overflow = ""
     document.body.style.overscrollBehavior = ""
@@ -296,18 +309,24 @@ useEffect(() => {
     return
   }
 
-  const htmlOverflow = document.documentElement.style.overflow
-  const bodyOverflow = document.body.style.overflow
-  const bodyOverscroll = document.body.style.overscrollBehavior
+  const htmlOverflow =
+    document.documentElement.style.overflow
+  const bodyOverflow =
+    document.body.style.overflow
+  const bodyOverscroll =
+    document.body.style.overscrollBehavior
 
   document.documentElement.style.overflow = "hidden"
   document.body.style.overflow = "hidden"
   document.body.style.overscrollBehavior = "none"
 
   return () => {
-    document.documentElement.style.overflow = htmlOverflow
-    document.body.style.overflow = bodyOverflow
-    document.body.style.overscrollBehavior = bodyOverscroll
+    document.documentElement.style.overflow =
+      htmlOverflow
+    document.body.style.overflow =
+      bodyOverflow
+    document.body.style.overscrollBehavior =
+      bodyOverscroll
   }
 }, [gameState])
 
@@ -716,14 +735,36 @@ useEffect(() => {
               }
             }
 
+            // Shapes are snapshots, not point deltas. Replacing the small
+            // bounds payload avoids accumulating bogus points and keeps
+            // remote shape previews cheap.
+            if (incoming.type === "shape") {
+              return {
+                ...current,
+                [incoming.id]: {
+                  ...existing,
+                  ...incoming,
+                },
+              }
+            }
+
             return {
               ...current,
               [incoming.id]: {
                 ...existing,
                 points: [
-                  ...existing.points,
+                  ...(existing.points || []),
                   ...(incoming.points || []),
                 ],
+                pen:
+                  incoming.pen ??
+                  existing.pen,
+                closed:
+                  incoming.closed ??
+                  existing.closed,
+                fill:
+                  incoming.fill ??
+                  existing.fill,
               },
             }
           })
@@ -768,25 +809,88 @@ useEffect(() => {
 
           const current = strokesRef.current
 
-          if (
-            current.some(
+          // The drawer optimistically inserts the operation before Rails
+          // broadcasts the canonical persisted version. Replace that
+          // optimistic copy when the server echo arrives so fields such as
+          // Pen fill/closed state cannot diverge between clients.
+          const existingIndex =
+            current.findIndex(
               (existing) =>
-                existing.id === stroke.id
+                existing?.id === stroke.id
             )
-          ) {
-            return
-          }
 
-          const next = [
-            ...current,
-            stroke,
-          ]
+          const next =
+            existingIndex >= 0
+              ? current.map(
+                  (existing, index) =>
+                    index === existingIndex
+                      ? stroke
+                      : existing
+                )
+              : [
+                  ...current,
+                  stroke,
+                ]
 
           strokesRef.current = next
           setStrokes(next)
 
           recordRoundStrokes(roundId, next)
 
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Vector object updated
+        // --------------------------------------------------------------
+
+        if (data.type === "object_updated") {
+          if (isStaleRound(data.round?.id)) {
+            return
+          }
+
+          const operation = data.operation
+          if (!operation?.id || !operation?.objectId) {
+            return
+          }
+
+          const current = strokesRef.current
+
+          if (current.some((existing) => existing?.id === operation.id)) {
+            return
+          }
+
+          const next = [...current, operation]
+          strokesRef.current = next
+          setStrokes(next)
+          recordRoundStrokes(data.round?.id, next)
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Vector object deleted
+        // --------------------------------------------------------------
+
+        if (data.type === "object_deleted") {
+          if (isStaleRound(data.round?.id)) {
+            return
+          }
+
+          const operation = data.operation
+          if (!operation?.id || !operation?.objectId) {
+            return
+          }
+
+          const current = strokesRef.current
+
+          if (current.some((existing) => existing?.id === operation.id)) {
+            return
+          }
+
+          const next = [...current, operation]
+          strokesRef.current = next
+          setStrokes(next)
+          recordRoundStrokes(data.round?.id, next)
           return
         }
 
@@ -841,6 +945,45 @@ useEffect(() => {
 
             return next
           })
+
+          return
+        }
+
+        // --------------------------------------------------------------
+        // Layer order changed
+        // --------------------------------------------------------------
+
+        if (data.type === "layer_reordered") {
+          if (isStaleRound(data.round?.id)) {
+            return
+          }
+
+          const operation = data.operation
+          if (!operation?.id || operation.type !== "layer_reorder") {
+            return
+          }
+
+          const current = strokesRef.current
+
+          if (
+            current.some(
+              (existing) => existing?.id === operation.id
+            )
+          ) {
+            return
+          }
+
+          const next = [
+            ...current,
+            operation,
+          ]
+
+          strokesRef.current = next
+          setStrokes(next)
+          recordRoundStrokes(
+            data.round?.id,
+            next
+          )
 
           return
         }
@@ -1230,39 +1373,62 @@ useEffect(() => {
 }
 
 function drawStroke(stroke) {
-  if (!subscriptionRef.current) {
-    return
-  }
-
-  const roundId = currentRoundRef.current?.id
-  const current = strokesRef.current
-
   if (
-    current.some(
-      (existing) =>
-        existing.id === stroke.id
-    )
+    !subscriptionRef.current ||
+    !stroke ||
+    !currentRoundRef.current?.id
   ) {
     return
   }
 
-  const next = [
-    ...current,
-    stroke,
-  ]
+  const roundId = currentRoundRef.current.id
+  const current = strokesRef.current
 
-  strokesRef.current = next
-  setStrokes(next)
+  // GameCanvas optimistically records operations locally before handing them
+  // to Show. Do NOT return just because the operation is already present:
+  // the ActionCable command still has to be sent to Rails. Previously this
+  // duplicate guard prevented shapes, layer_reorder, and object edits from
+  // ever reaching the server.
+  const alreadyPresent = current.some(
+    (existing) =>
+      existing?.id === stroke.id
+  )
 
-  recordRoundStrokes(roundId, next)
+  if (!alreadyPresent) {
+    const next = [
+      ...current,
+      stroke,
+    ]
+
+    strokesRef.current = next
+    setStrokes(next)
+    recordRoundStrokes(roundId, next)
+  }
+
+  const command =
+    stroke.type === "object_update"
+      ? "update_object"
+      : stroke.type === "object_delete"
+        ? "delete_object"
+        : stroke.type === "layer_reorder"
+          ? "reorder_layers"
+          : "draw_stroke"
 
   subscriptionRef.current.perform(
-    "draw_stroke",
+    command,
     stroke
   )
 }
 
 function undoStroke(strokeId) {
+  if (
+    !subscriptionRef.current ||
+    !strokeId ||
+    !currentRoundRef.current?.id
+  ) {
+    return
+  }
+
   subscriptionRef.current.perform(
     "undo_stroke",
     {
@@ -1859,10 +2025,8 @@ return (
               <div className="drawing-canvas-shell absolute inset-0 overflow-hidden">
                 <GameCanvas
                   roundId={currentRound.id}
-                  strokes={[
-                    ...strokes,
-                    ...Object.values(liveStrokes),
-                  ]}
+                  strokes={strokes}
+                  liveStrokes={liveStrokes}
                   canDraw={
                     isDrawer &&
                     timeLeft !== null &&
@@ -2276,10 +2440,8 @@ return (
           <div className="aspect-square w-full overflow-hidden rounded-2xl border border-zinc-800 bg-white">
             <GameCanvas
               roundId={currentRound.id}
-              strokes={[
-                ...strokes,
-                ...Object.values(liveStrokes),
-              ]}
+              strokes={strokes}
+              liveStrokes={liveStrokes}
               canDraw={
                 isDrawer &&
                 timeLeft !== null &&

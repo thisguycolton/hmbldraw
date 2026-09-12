@@ -22,6 +22,14 @@ class GameRoomGame
     new(game_room, player).draw_stroke!(stroke)
   end
 
+  def self.update_object!(game_room, player, operation)
+    new(game_room, player).update_object!(operation)
+  end
+
+  def self.delete_object!(game_room, player, operation)
+    new(game_room, player).delete_object!(operation)
+  end
+
   def self.undo_stroke!(game_room, player, stroke_id)
     new(game_room, player).undo_stroke!(stroke_id)
   end
@@ -745,6 +753,10 @@ def draw_stroke!(stroke)
 
     stroke = normalize_stroke(stroke)
 
+    Rails.logger.debug(
+      "[GameRoomGame] normalized stroke id=#{stroke["id"]} "       "type=#{stroke["type"]} pen=#{stroke["pen"]} "       "closed=#{stroke["closed"]} fill=#{stroke["fill"].inspect}"
+    )
+
     if stroke["id"].blank?
       raise Error, "Invalid drawing operation ID."
     end
@@ -755,8 +767,102 @@ def draw_stroke!(stroke)
     # Idempotency
     # --------------------------------------------------------------------------
 
-    unless strokes.any? { |existing| existing["id"] == stroke["id"] }
+    unless strokes.any? { |existing| existing["id"].to_s == stroke["id"].to_s }
       strokes << stroke
+      round.update!(strokes: strokes)
+    end
+  end
+
+  round
+end
+
+def reorder_layers!(operation)
+  round = nil
+
+  @game_room.with_lock do
+    round = current_round!
+
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can reorder layers."
+    end
+
+    operation = normalize_layer_reorder(operation)
+    strokes = Array(round.strokes)
+
+    drawable_ids = strokes
+      .select { |item| !%w[layer_reorder object_update object_delete].include?(item["type"].to_s) }
+      .map { |item| item["id"].to_s }
+      .reject(&:blank?)
+
+    requested = operation["order"].map(&:to_s)
+    order = requested.select { |id| drawable_ids.include?(id) }
+    order += drawable_ids.reject { |id| order.include?(id) }
+
+    normalized = operation.merge("order" => order)
+
+    unless strokes.any? { |existing| existing["id"].to_s == normalized["id"].to_s }
+      strokes << normalized
+      round.update!(strokes: strokes)
+    end
+  end
+
+  round
+end
+
+def update_object!(operation)
+
+  round = nil
+
+  @game_room.with_lock do
+    round = current_round!
+
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can edit the drawing."
+    end
+
+    operation = normalize_object_update(operation)
+    strokes = Array(round.strokes)
+
+    object_exists = strokes.any? do |existing|
+      existing["id"].to_s == operation["objectId"]
+    end
+
+    unless object_exists
+      raise Error, "Drawing object no longer exists."
+    end
+
+    unless strokes.any? { |existing| existing["id"].to_s == operation["id"] }
+      strokes << operation
+      round.update!(strokes: strokes)
+    end
+  end
+
+  round
+end
+
+def delete_object!(operation)
+  round = nil
+
+  @game_room.with_lock do
+    round = current_round!
+
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can edit the drawing."
+    end
+
+    operation = normalize_object_delete(operation)
+    strokes = Array(round.strokes)
+
+    object_exists = strokes.any? do |existing|
+      existing["id"].to_s == operation["objectId"]
+    end
+
+    unless object_exists
+      raise Error, "Drawing object no longer exists."
+    end
+
+    unless strokes.any? { |existing| existing["id"].to_s == operation["id"] }
+      strokes << operation
       round.update!(strokes: strokes)
     end
   end
@@ -774,9 +880,16 @@ def undo_stroke!(stroke_id)
       raise Error, "Only the drawer can undo strokes."
     end
 
+    strokes = Array(round.strokes)
+    target_id = stroke_id.to_s
+
+    unless strokes.any? { |stroke| stroke["id"].to_s == target_id }
+      raise Error, "Nothing to undo."
+    end
+
     strokes =
-      Array(round.strokes).reject do |stroke|
-        stroke["id"] == stroke_id.to_s
+      strokes.reject do |stroke|
+        stroke["id"].to_s == target_id
       end
 
     round.update!(strokes: strokes)
@@ -803,6 +916,148 @@ end
 
 private
 
+def normalize_layer_reorder(operation)
+  operation = operation.to_h.stringify_keys
+  id = operation["id"].to_s.first(100)
+
+  order =
+    Array(operation["order"])
+      .first(500)
+      .map { |value| value.to_s.first(100) }
+      .select(&:present?)
+      .uniq
+
+  raise Error, "Invalid layer operation ID." if id.blank?
+  raise Error, "Invalid layer order." if order.empty?
+
+  {
+    "id" => id,
+    "type" => "layer_reorder",
+    "order" => order
+  }
+end
+
+def normalize_object_update(operation)
+
+  operation = operation.to_h.stringify_keys
+  id = operation["id"].to_s.first(100)
+  object_id = operation["objectId"].to_s.first(100)
+
+  raise Error, "Invalid drawing operation ID." if id.blank?
+  raise Error, "Invalid drawing object ID." if object_id.blank?
+
+  changes = operation["changes"]
+  changes = changes.to_h.stringify_keys if changes.is_a?(Hash)
+
+  unless changes.is_a?(Hash)
+    raise Error, "Invalid drawing update."
+  end
+
+  allowed = %w[points bounds color width shape start end pen closed type fill hidden]
+  changes = changes.slice(*allowed)
+
+  normalized = {
+    "id" => id,
+    "type" => "object_update",
+    "objectId" => object_id,
+    "changes" => changes
+  }
+
+  if changes.key?("points")
+    normalized["changes"]["points"] =
+      Array(changes["points"]).first(5000).filter_map do |point|
+        next unless point.is_a?(Array) && point.length == 2
+        x = Float(point[0]) rescue nil
+        y = Float(point[1]) rescue nil
+        next unless x && y
+        [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]
+      end
+  end
+
+  if changes.key?("bounds") && changes["bounds"].is_a?(Hash)
+    bounds = changes["bounds"].stringify_keys
+    x = Float(bounds["x"]) rescue 0.0
+    y = Float(bounds["y"]) rescue 0.0
+    width_value = Float(bounds["width"]) rescue 0.0
+    height_value = Float(bounds["height"]) rescue 0.0
+
+    normalized["changes"]["bounds"] = {
+      "x" => x.clamp(0.0, 1.0),
+      "y" => y.clamp(0.0, 1.0),
+      "width" => width_value.clamp(0.0, 1.0),
+      "height" => height_value.clamp(0.0, 1.0)
+    }
+  end
+
+  if changes.key?("start") || changes.key?("end")
+    %w[start end].each do |key|
+      next unless changes[key].is_a?(Array) && changes[key].length == 2
+      x = Float(changes[key][0]) rescue nil
+      y = Float(changes[key][1]) rescue nil
+      normalized["changes"][key] =
+        x && y ? [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)] : nil
+    end
+  end
+
+  if changes.key?("color")
+    color = changes["color"].to_s
+    normalized["changes"]["color"] =
+      color.match?(/\A#[0-9a-fA-F]{6}\z/) ? color : "#18181b"
+  end
+
+  if changes.key?("width")
+    normalized["changes"]["width"] =
+      changes["width"].to_f.clamp(1.0, 30.0)
+  end
+
+  if normalized["changes"].key?("type") &&
+     !%w[stroke shape].include?(normalized["changes"]["type"].to_s)
+    raise Error, "Invalid drawing update type."
+  end
+
+  if normalized["changes"].key?("pen")
+    normalized["changes"]["pen"] = !!normalized["changes"]["pen"]
+  end
+
+  if normalized["changes"].key?("closed")
+    normalized["changes"]["closed"] = !!normalized["changes"]["closed"]
+  end
+
+  if changes.key?("fill")
+    fill = changes["fill"].to_s
+    normalized["changes"]["fill"] =
+      if fill.blank?
+        nil
+      elsif fill.match?(%r{\A#[0-9a-fA-F]{6}\z})
+        fill
+      else
+        "#18181b"
+      end
+  end
+
+  if normalized["changes"].key?("shape") &&
+     !%w[line circle square triangle].include?(normalized["changes"]["shape"].to_s)
+    raise Error, "Invalid drawing shape."
+  end
+
+  normalized
+end
+
+def normalize_object_delete(operation)
+  operation = operation.to_h.stringify_keys
+  id = operation["id"].to_s.first(100)
+  object_id = operation["objectId"].to_s.first(100)
+
+  raise Error, "Invalid drawing operation ID." if id.blank?
+  raise Error, "Invalid drawing object ID." if object_id.blank?
+
+  {
+    "id" => id,
+    "type" => "object_delete",
+    "objectId" => object_id
+  }
+end
+
 def normalize_stroke(stroke)
   stroke =
     stroke
@@ -814,7 +1069,7 @@ def normalize_stroke(stroke)
 
   type = "stroke" if type.blank?
 
-  unless %w[stroke eraser fill].include?(type)
+  unless %w[stroke eraser fill shape].include?(type)
     raise Error, "Invalid drawing operation."
   end
 
@@ -826,10 +1081,104 @@ def normalize_stroke(stroke)
   raise Error, "Invalid drawing operation ID." if id.blank?
 
   # --------------------------------------------------------------------------
-  # Bucket fill
+  # Vector shape
   # --------------------------------------------------------------------------
 
-  if type == "fill"
+  if type == "shape"
+    shape = stroke["shape"].to_s
+
+    unless %w[line circle square triangle].include?(shape)
+      raise Error, "Invalid shape."
+    end
+
+    color = stroke["color"].to_s
+    color = color.match?(/\A#[0-9a-fA-F]{6}\z/) ? color : "#18181b"
+
+    width = stroke["width"].to_f.clamp(1.0, 30.0)
+    bounds = stroke["bounds"].to_h.stringify_keys
+
+    x = Float(bounds["x"]) rescue nil
+    y = Float(bounds["y"]) rescue nil
+    width_value = Float(bounds["width"]) rescue nil
+    height_value = Float(bounds["height"]) rescue nil
+
+    unless x && y && width_value && height_value
+      raise Error, "Invalid shape bounds."
+    end
+
+    normalized = {
+      "id" => id,
+      "type" => "shape",
+      "shape" => shape,
+      "color" => color,
+      "width" => width,
+      "fill" => (
+        stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ?
+          stroke["fill"].to_s :
+          nil
+      ),
+      "bounds" => {
+        "x" => x.clamp(0.0, 1.0),
+        "y" => y.clamp(0.0, 1.0),
+        "width" => width_value.clamp(0.0, 1.0),
+        "height" => height_value.clamp(0.0, 1.0)
+      }
+    }
+
+    %w[start end].each do |key|
+      next unless stroke[key].is_a?(Array) && stroke[key].length == 2
+      sx = Float(stroke[key][0]) rescue nil
+      sy = Float(stroke[key][1]) rescue nil
+      normalized[key] = [sx.clamp(0.0, 1.0), sy.clamp(0.0, 1.0)] if sx && sy
+    end
+
+    # Preserve concrete points when the client supplies them. This keeps
+    # shapes compatible with generic stroke validation and replay.
+    shape_points =
+      Array(stroke["points"]).first(5000).filter_map do |point|
+        next unless point.is_a?(Array) && point.length == 2
+        px = Float(point[0]) rescue nil
+        py = Float(point[1]) rescue nil
+        next unless px && py
+        [px.clamp(0.0, 1.0), py.clamp(0.0, 1.0)]
+      end
+
+    if shape_points.length >= 2
+      normalized["points"] = shape_points
+    else
+      # Derive simple concrete geometry from the canonical bounds.
+      bx = normalized["bounds"]["x"]
+      by = normalized["bounds"]["y"]
+      bw = normalized["bounds"]["width"]
+      bh = normalized["bounds"]["height"]
+
+      normalized["points"] =
+        case shape
+        when "triangle"
+          [
+            [bx + bw / 2.0, by],
+            [bx + bw, by + bh],
+            [bx, by + bh],
+            [bx + bw / 2.0, by]
+          ]
+        when "line"
+          [
+            [bx, by],
+            [bx + bw, by + bh]
+          ]
+        else
+          [
+            [bx, by],
+            [bx + bw, by],
+            [bx + bw, by + bh],
+            [bx, by + bh],
+            [bx, by]
+          ]
+        end
+    end
+
+    normalized
+  elsif type == "fill"
     point =
       Array(stroke["point"])
 
@@ -909,10 +1258,16 @@ def normalize_stroke(stroke)
     "type" => type,
     "points" => points,
     "color" => color,
-    "width" => width
+    "width" => width,
+    "pen" => !!stroke["pen"],
+    "closed" => !!stroke["closed"],
+    "fill" => (
+      stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ?
+        stroke["fill"].to_s :
+        nil
+    )
   }
 end
-
 
 def current_round!
   @game_room.reload

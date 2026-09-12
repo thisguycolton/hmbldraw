@@ -1,14 +1,30 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
+  ChevronDown,
+  Circle,
   Eraser,
+  Eye,
+  EyeOff,
+  Layers,
   PaintBucket,
   Pencil,
+  PenLine,
   RotateCcw,
+  Square,
   Trash2,
+  Triangle,
+  Undo2,
+  MousePointer2,
+  Minus,
+  Anchor,
+  Waves,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUp,
+  ChevronsDown,
 } from "lucide-react"
 
 const CANVAS_SIZE = 1200
-
 const CANVAS_WIDTH = CANVAS_SIZE
 const CANVAS_HEIGHT = CANVAS_SIZE
 
@@ -35,30 +51,1266 @@ const STROKE_WIDTHS = [
   { label: "Huge", value: 24 },
 ]
 
-// Send live drawing updates at most about 30 times per second.
 const LIVE_UPDATE_INTERVAL = 30
-
-// Ignore points that are extremely close together.
 const MIN_POINT_DISTANCE = 0.0015
 
-// Flood-fill color tolerance.
-//
-// Anti-aliased drawing edges contain pixels that aren't exactly the
-// foreground/background color. A small tolerance prevents the bucket
-// from leaking through those edges.
 const FILL_TOLERANCE = 18
 const FILL_EDGE_TOLERANCE = 64
 
+const PEN_SIMPLIFY_TOLERANCE = 0.0018
+const PEN_MAX_POINTS = 450
+
+// Reference Pen behavior uses a 28px close distance on a 1200px canvas.
+const PEN_CLOSE_DISTANCE = 28 / CANVAS_SIZE
+
+function shouldSnapPenClosed(points) {
+  // Pen strokes are shape-like freeform paths. Once the user has supplied
+  // enough points, we always close the path back to its starting point.
+  // This intentionally does NOT require the pointer to return to the start.
+  return Array.isArray(points) && points.length >= 3
+}
+
+function snapPenClosed(points) {
+  if (!Array.isArray(points) || points.length < 2) {
+    return points
+  }
+
+  return [
+    ...points.slice(0, -1),
+    clonePoint(points[0]),
+  ]
+}
+
+const ERASER_MIN_RADIUS = 0.012
+const ERASER_MAX_RADIUS = 0.12
 
 const TOOLS = {
+  SELECT: "select",
   PENCIL: "pencil",
+  PEN: "pen",
+  LINE: "line",
+  CIRCLE: "circle",
+  SQUARE: "square",
+  TRIANGLE: "triangle",
   ERASER: "eraser",
   BUCKET: "bucket",
+  ANCHOR: "anchor",
+  CURVE: "curve",
 }
+
+const SHAPE_TOOLS = [
+  TOOLS.LINE,
+  TOOLS.CIRCLE,
+  TOOLS.SQUARE,
+  TOOLS.TRIANGLE,
+]
+
+const EDIT_TOOLS = [
+  TOOLS.SELECT,
+  TOOLS.ANCHOR,
+  TOOLS.CURVE,
+]
+
+/*
+ * ---------------------------------------------------------------------------
+ * General geometry
+ * ---------------------------------------------------------------------------
+ */
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function pointDistance(a, b) {
+  return Math.hypot(
+    a[0] - b[0],
+    a[1] - b[1]
+  )
+}
+
+function normalizedDistance(a, b) {
+  return pointDistance(a, b)
+}
+
+function createStrokeId() {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID()
+  }
+
+  return `${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`
+}
+
+function hexToHsv(hex) {
+  const value = String(hex || "#18181b").replace("#", "")
+  if (!/^[0-9a-fA-F]{6}$/.test(value)) return { h: 0, s: 0, v: 0.0941 }
+  const r = parseInt(value.slice(0, 2), 16) / 255
+  const g = parseInt(value.slice(2, 4), 16) / 255
+  const b = parseInt(value.slice(4, 6), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  let h = 0
+  if (delta) {
+    if (max === r) h = ((g - b) / delta) % 6
+    else if (max === g) h = (b - r) / delta + 2
+    else h = (r - g) / delta + 4
+    h *= 60
+    if (h < 0) h += 360
+  }
+  return { h, s: max === 0 ? 0 : delta / max, v: max }
+}
+
+function hsvToHex(h, s, v) {
+  const hue = ((Number(h) % 360) + 360) % 360
+  const saturation = clamp(Number(s) || 0, 0, 1)
+  const value = clamp(Number(v) || 0, 0, 1)
+  const c = value * saturation
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
+  const m = value - c
+  let r = 0, g = 0, b = 0
+  if (hue < 60) { r = c; g = x }
+  else if (hue < 120) { r = x; g = c }
+  else if (hue < 180) { g = c; b = x }
+  else if (hue < 240) { g = x; b = c }
+  else if (hue < 300) { r = x; b = c }
+  else { r = c; b = x }
+  const ch = (n) => Math.round((n + m) * 255).toString(16).padStart(2, "0")
+  return `#${ch(r)}${ch(g)}${ch(b)}`
+}
+
+function clonePoint(point) {
+  return [
+    point[0],
+    point[1],
+  ]
+}
+
+function clonePoints(points) {
+  return Array.isArray(points)
+    ? points.map(clonePoint)
+    : []
+}
+
+function cloneOperation(operation) {
+  if (!operation) {
+    return null
+  }
+
+  return JSON.parse(JSON.stringify(operation))
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * RDP simplification
+ * ---------------------------------------------------------------------------
+ */
+
+function perpendicularDistance(
+  point,
+  start,
+  end
+) {
+  const dx = end[0] - start[0]
+  const dy = end[1] - start[1]
+
+  if (dx === 0 && dy === 0) {
+    return pointDistance(point, start)
+  }
+
+  const t = clamp(
+    (
+      (point[0] - start[0]) * dx +
+      (point[1] - start[1]) * dy
+    ) /
+      (dx * dx + dy * dy),
+    0,
+    1
+  )
+
+  const projection = [
+    start[0] + t * dx,
+    start[1] + t * dy,
+  ]
+
+  return pointDistance(
+    point,
+    projection
+  )
+}
+
+function simplifyRdp(points, tolerance) {
+  if (points.length <= 2) {
+    return points
+  }
+
+  let maxDistance = 0
+  let index = 0
+
+  const first = points[0]
+  const last = points[points.length - 1]
+
+  for (
+    let i = 1;
+    i < points.length - 1;
+    i += 1
+  ) {
+    const distance =
+      perpendicularDistance(
+        points[i],
+        first,
+        last
+      )
+
+    if (distance > maxDistance) {
+      index = i
+      maxDistance = distance
+    }
+  }
+
+  if (maxDistance > tolerance) {
+    const left =
+      simplifyRdp(
+        points.slice(
+          0,
+          index + 1
+        ),
+        tolerance
+      )
+
+    const right =
+      simplifyRdp(
+        points.slice(index),
+        tolerance
+      )
+
+    return [
+      ...left.slice(0, -1),
+      ...right,
+    ]
+  }
+
+  return [
+    first,
+    last,
+  ]
+}
+
+function resamplePoints(
+  points,
+  maxPoints
+) {
+  if (points.length <= maxPoints) {
+    return points
+  }
+
+  const result = []
+
+  for (
+    let i = 0;
+    i < maxPoints;
+    i += 1
+  ) {
+    const index = Math.round(
+      (
+        i /
+        (maxPoints - 1)
+      ) *
+        (points.length - 1)
+    )
+
+    result.push(
+      points[index]
+    )
+  }
+
+  return result
+}
+
+function preparePenPoints(points) {
+  if (
+    !Array.isArray(points) ||
+    points.length <= 2
+  ) {
+    return points
+  }
+
+  const cleaned = [
+    points[0],
+  ]
+
+  for (
+    let i = 1;
+    i < points.length;
+    i += 1
+  ) {
+    if (
+      pointDistance(
+        points[i],
+        cleaned[
+          cleaned.length - 1
+        ]
+      ) >= 0.0008
+    ) {
+      cleaned.push(
+        points[i]
+      )
+    }
+  }
+
+  if (cleaned.length <= 2) {
+    return cleaned
+  }
+
+  const simplified =
+    simplifyRdp(
+      cleaned,
+      PEN_SIMPLIFY_TOLERANCE
+    )
+
+  return resamplePoints(
+    simplified,
+    PEN_MAX_POINTS
+  )
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Bounds
+ * ---------------------------------------------------------------------------
+ */
+
+function calculateBoundsFromPoints(
+  points,
+  padding = 0
+) {
+  if (
+    !Array.isArray(points) ||
+    points.length === 0
+  ) {
+    return {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    }
+  }
+
+  let minX = points[0][0]
+  let minY = points[0][1]
+  let maxX = points[0][0]
+  let maxY = points[0][1]
+
+  for (
+    const point of points
+  ) {
+    minX = Math.min(
+      minX,
+      point[0]
+    )
+
+    minY = Math.min(
+      minY,
+      point[1]
+    )
+
+    maxX = Math.max(
+      maxX,
+      point[0]
+    )
+
+    maxY = Math.max(
+      maxY,
+      point[1]
+    )
+  }
+
+  return {
+    x: minX - padding,
+    y: minY - padding,
+    width:
+      maxX -
+      minX +
+      padding * 2,
+    height:
+      maxY -
+      minY +
+      padding * 2,
+  }
+}
+
+function calculateOperationBounds(
+  operation
+) {
+  if (!operation) {
+    return null
+  }
+
+  if (
+    Array.isArray(
+      operation.points
+    )
+  ) {
+    return calculateBoundsFromPoints(
+      operation.points
+    )
+  }
+
+  if (
+    operation.bounds
+  ) {
+    return {
+      ...operation.bounds,
+    }
+  }
+
+  if (
+    operation.start &&
+    operation.end
+  ) {
+    return calculateBoundsFromPoints([
+      operation.start,
+      operation.end,
+    ])
+  }
+
+  return null
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Shape geometry
+ * ---------------------------------------------------------------------------
+ */
+
+function makeShapeOperation(
+  shape,
+  start,
+  end,
+  color,
+  width,
+  fill = null
+) {
+  const x1 = Math.min(
+    start[0],
+    end[0]
+  )
+
+  const y1 = Math.min(
+    start[1],
+    end[1]
+  )
+
+  let widthValue =
+    Math.abs(
+      end[0] -
+      start[0]
+    )
+
+  let heightValue =
+    Math.abs(
+      end[1] -
+      start[1]
+    )
+
+  if (
+    shape === "square"
+  ) {
+    const size =
+      Math.max(
+        widthValue,
+        heightValue
+      )
+
+    widthValue = size
+    heightValue = size
+  }
+
+  const bounds = {
+    x: x1,
+    y: y1,
+    width: widthValue,
+    height: heightValue,
+  }
+
+  const operation = {
+    id: createStrokeId(),
+    type: "shape",
+    shape,
+    start: clonePoint(start),
+    end: clonePoint(end),
+    color,
+    width,
+    fill: fill || null,
+    bounds,
+  }
+
+  // Keep concrete geometry in the payload as well as the parametric shape
+  // data. This makes shape operations compatible with the generic drawing
+  // persistence/validation path and gives Undo a real persisted operation.
+  operation.points = shapePersistencePoints(operation)
+
+  return operation
+}
+
+function shapePoints(
+  operation
+) {
+  const bounds =
+    operation?.bounds
+
+  if (!bounds) {
+    return []
+  }
+
+  const {
+    x,
+    y,
+    width,
+    height,
+  } = bounds
+
+  if (operation.shape === "triangle") {
+    return [
+      [x + width / 2, y],
+      [x + width, y + height],
+      [x, y + height],
+    ]
+  }
+
+  return []
+}
+
+// Concrete geometry used for persistence/validation of parametric shapes.
+// Rendering can remain parametric, but the saved operation also carries a
+// valid points array so generic stroke validators cannot reject it.
+function shapePersistencePoints(operation) {
+  if (!operation?.bounds) return []
+
+  const { x, y, width, height } = operation.bounds
+
+  if (operation.shape === "line") {
+    return [
+      clonePoint(operation.start || [x, y]),
+      clonePoint(operation.end || [x + width, y + height]),
+    ]
+  }
+
+  if (operation.shape === "triangle") {
+    const points = shapePoints(operation)
+    return points.length >= 3
+      ? [...points, clonePoint(points[0])]
+      : []
+  }
+
+  if (operation.shape === "square") {
+    return [
+      [x, y],
+      [x + width, y],
+      [x + width, y + height],
+      [x, y + height],
+      [x, y],
+    ]
+  }
+
+  if (operation.shape === "circle") {
+    const cx = x + width / 2
+    const cy = y + height / 2
+    const rx = width / 2
+    const ry = height / 2
+    const points = []
+    const segments = 48
+
+    for (let i = 0; i <= segments; i += 1) {
+      const angle = (i / segments) * Math.PI * 2
+      points.push([
+        cx + Math.cos(angle) * rx,
+        cy + Math.sin(angle) * ry,
+      ])
+    }
+
+    return points
+  }
+
+  return []
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Eraser geometry
+ * ---------------------------------------------------------------------------
+ */
+
+function distanceToSegment(
+  point,
+  start,
+  end
+) {
+  const dx =
+    end[0] -
+    start[0]
+
+  const dy =
+    end[1] -
+    start[1]
+
+  if (
+    dx === 0 &&
+    dy === 0
+  ) {
+    return pointDistance(
+      point,
+      start
+    )
+  }
+
+  const t = clamp(
+    (
+      (
+        point[0] -
+        start[0]
+      ) *
+        dx +
+      (
+        point[1] -
+        start[1]
+      ) *
+        dy
+    ) /
+      (
+        dx * dx +
+        dy * dy
+      ),
+    0,
+    1
+  )
+
+  return pointDistance(
+    point,
+    [
+      start[0] +
+        dx * t,
+      start[1] +
+        dy * t,
+    ]
+  )
+}
+
+function pointToPolylineDistance(
+  point,
+  points
+) {
+  if (
+    !Array.isArray(points) ||
+    points.length === 0
+  ) {
+    return Infinity
+  }
+
+  if (points.length === 1) {
+    return pointDistance(
+      point,
+      points[0]
+    )
+  }
+
+  let minimum = Infinity
+
+  for (
+    let i = 1;
+    i < points.length;
+    i += 1
+  ) {
+    minimum = Math.min(
+      minimum,
+      distanceToSegment(
+        point,
+        points[i - 1],
+        points[i]
+      )
+    )
+  }
+
+  return minimum
+}
+
+/*
+ * Erase a polyline by removing points inside the eraser radius.
+ *
+ * We intentionally preserve multiple surviving segments. That means a
+ * partially erased Pen becomes multiple visual pieces without needing
+ * rasterization.
+ */
+function erasePolyline(
+  points,
+  eraserPoint,
+  radius
+) {
+  if (
+    !Array.isArray(points) ||
+    points.length === 0
+  ) {
+    return []
+  }
+
+  const survivingSegments = []
+  let current = []
+
+  for (
+    let i = 0;
+    i < points.length;
+    i += 1
+  ) {
+    const point =
+      points[i]
+
+    const distance =
+      pointDistance(
+        point,
+        eraserPoint
+      )
+
+    if (
+      distance > radius
+    ) {
+      current.push(
+        clonePoint(point)
+      )
+    } else {
+      if (
+        current.length > 0
+      ) {
+        survivingSegments.push(
+          current
+        )
+        current = []
+      }
+    }
+  }
+
+  if (
+    current.length > 0
+  ) {
+    survivingSegments.push(
+      current
+    )
+  }
+
+  /*
+   * A point-only test can leave a segment whose middle crosses the eraser.
+   * Remove tiny fragments that are unlikely to be visually meaningful.
+   */
+  return survivingSegments.filter(
+    (segment) =>
+      segment.length >= 2
+  )
+}
+
+function convertShapeToPath(
+  operation
+) {
+  if (!operation) {
+    return null
+  }
+
+  if (
+    operation.shape ===
+    "line"
+  ) {
+    return [
+      operation.start,
+      operation.end,
+    ]
+  }
+
+  if (
+    operation.shape ===
+    "triangle"
+  ) {
+    return shapePoints(
+      operation
+    )
+  }
+
+  const bounds =
+    operation.bounds
+
+  if (!bounds) {
+    return null
+  }
+
+  const {
+    x,
+    y,
+    width,
+    height,
+  } = bounds
+
+  const steps = 64
+  const points = []
+
+  if (
+    operation.shape ===
+    "circle"
+  ) {
+    const cx =
+      x + width / 2
+
+    const cy =
+      y + height / 2
+
+    const rx =
+      width / 2
+
+    const ry =
+      height / 2
+
+    for (
+      let i = 0;
+      i <= steps;
+      i += 1
+    ) {
+      const angle =
+        (
+          i /
+          steps
+        ) *
+        Math.PI *
+        2
+
+      points.push([
+        cx +
+          Math.cos(angle) *
+            rx,
+
+        cy +
+          Math.sin(angle) *
+            ry,
+      ])
+    }
+
+    return points
+  }
+
+  return [
+    [x, y],
+    [x + width, y],
+    [x + width, y + height],
+    [x, y + height],
+    [x, y],
+  ]
+}
+
+function eraseOperation(
+  operation,
+  eraserPoint,
+  radius
+) {
+  if (!operation) {
+    return null
+  }
+
+  /*
+   * Closed Pen fill is a vector property. When the eraser is inside the
+   * filled region, remove the fill property first instead of treating the
+   * interior click as an anchor/path hit.
+   */
+  if (
+    operation.pen &&
+    operation.fill &&
+    Array.isArray(operation.points) &&
+    operation.points.length >= 3 &&
+    pointInPolygon(
+      eraserPoint,
+      operation.points
+    )
+  ) {
+    return {
+      operation: {
+        ...cloneOperation(operation),
+        fill: null,
+      },
+    }
+  }
+
+  /*
+   * Normal freehand/Pen operation.
+   */
+  if (
+    Array.isArray(
+      operation.points
+    )
+  ) {
+    const segments =
+      erasePolyline(
+        operation.points,
+        eraserPoint,
+        radius
+      )
+
+    if (
+      segments.length === 0
+    ) {
+      return {
+        deleted: true,
+      }
+    }
+
+    return {
+      operation: {
+        ...cloneOperation(
+          operation
+        ),
+        points:
+          segments[0],
+        bounds:
+          calculateBoundsFromPoints(
+            segments[0]
+          ),
+      },
+
+      additionalSegments:
+        segments
+          .slice(1)
+          .map(
+            (points) => ({
+              ...cloneOperation(
+                operation
+              ),
+
+              id:
+                createStrokeId(),
+
+              points,
+
+              bounds:
+                calculateBoundsFromPoints(
+                  points
+                ),
+            })
+          ),
+    }
+  }
+
+  /*
+   * Shapes become paths when touched by the eraser.
+   */
+  if (
+    operation.type ===
+    "shape"
+  ) {
+    const points =
+      convertShapeToPath(
+        operation
+      )
+
+    if (
+      !points ||
+      points.length < 2
+    ) {
+      return null
+    }
+
+    const segments =
+      erasePolyline(
+        points,
+        eraserPoint,
+        radius
+      )
+
+    if (
+      segments.length === 0
+    ) {
+      return {
+        deleted: true,
+      }
+    }
+
+    return {
+      operation: {
+        id: operation.id,
+        type: "stroke",
+        color:
+          operation.color ||
+          DEFAULT_COLOR,
+        width:
+          operation.width ||
+          DEFAULT_WIDTH,
+        points:
+          segments[0],
+        bounds:
+          calculateBoundsFromPoints(
+            segments[0]
+          ),
+      },
+
+      additionalSegments:
+        segments
+          .slice(1)
+          .map(
+            (points) => ({
+              id:
+                createStrokeId(),
+
+              type: "stroke",
+
+              color:
+                operation.color ||
+                DEFAULT_COLOR,
+
+              width:
+                operation.width ||
+                DEFAULT_WIDTH,
+
+              points,
+
+              bounds:
+                calculateBoundsFromPoints(
+                  points
+                ),
+            })
+          ),
+    }
+  }
+
+  return null
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Path / hit testing
+ * ---------------------------------------------------------------------------
+ */
+
+function operationContainsPoint(
+  context,
+  operation,
+  point
+) {
+  if (!operation) {
+    return false
+  }
+
+  const x =
+    point[0] *
+    CANVAS_WIDTH
+
+  const y =
+    point[1] *
+    CANVAS_HEIGHT
+
+  /*
+   * Shape hit testing.
+   */
+  if (
+    operation.type ===
+    "shape"
+  ) {
+    const bounds =
+      operation.bounds
+
+    if (!bounds) {
+      return false
+    }
+
+    const bx =
+      bounds.x *
+      CANVAS_WIDTH
+
+    const by =
+      bounds.y *
+      CANVAS_HEIGHT
+
+    const bw =
+      bounds.width *
+      CANVAS_WIDTH
+
+    const bh =
+      bounds.height *
+      CANVAS_HEIGHT
+
+    if (
+      operation.shape ===
+      "circle"
+    ) {
+      const cx =
+        bx + bw / 2
+
+      const cy =
+        by + bh / 2
+
+      const rx =
+        Math.max(
+          bw / 2,
+          1
+        )
+
+      const ry =
+        Math.max(
+          bh / 2,
+          1
+        )
+
+      return (
+        (
+          (x - cx) /
+            rx
+        ) **
+          2 +
+        (
+          (y - cy) /
+            ry
+        ) **
+          2 <=
+        1
+      )
+    }
+
+    if (
+      operation.shape ===
+      "square"
+    ) {
+      return (
+        x >= bx &&
+        x <= bx + bw &&
+        y >= by &&
+        y <= by + bh
+      )
+    }
+
+    if (
+      operation.shape ===
+      "triangle"
+    ) {
+      const points =
+        shapePoints(
+          operation
+        )
+
+      return pointInPolygon(
+        point,
+        points
+      )
+    }
+
+    if (
+      operation.shape ===
+      "line"
+    ) {
+      return (
+        pointToPolylineDistance(
+          point,
+          [
+            operation.start,
+            operation.end,
+          ]
+        ) <=
+        Math.max(
+          0.015,
+          (
+            operation.width ||
+            DEFAULT_WIDTH
+          ) /
+            CANVAS_SIZE
+        )
+      )
+    }
+  }
+
+  /*
+   * Stroke / Pen.
+   */
+  if (
+    Array.isArray(
+      operation.points
+    )
+  ) {
+    const threshold =
+      Math.max(
+        0.012,
+        (
+          operation.width ||
+          DEFAULT_WIDTH
+        ) /
+          CANVAS_SIZE *
+          1.8
+      )
+
+    return (
+      pointToPolylineDistance(
+        point,
+        operation.points
+      ) <= threshold
+    )
+  }
+
+  return false
+}
+
+function pointInPolygon(
+  point,
+  polygon
+) {
+  let inside = false
+
+  for (
+    let i = 0, j =
+      polygon.length - 1;
+    i < polygon.length;
+    j = i++
+  ) {
+    const xi =
+      polygon[i][0]
+
+    const yi =
+      polygon[i][1]
+
+    const xj =
+      polygon[j][0]
+
+    const yj =
+      polygon[j][1]
+
+    const intersects =
+      yi > point[1] !==
+        yj > point[1] &&
+      point[0] <
+        (
+          (
+            xj - xi
+          ) *
+            (
+              point[1] -
+              yi
+            )
+        ) /
+          (
+            yj - yi
+          ) +
+        xi
+
+    if (intersects) {
+      inside = !inside
+    }
+  }
+
+  return inside
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Game canvas
+ * ---------------------------------------------------------------------------
+ */
 
 export default function GameCanvas({
   roundId,
   strokes,
+  liveStrokes = {},
   canDraw,
   onStroke,
   onLiveStroke,
@@ -67,6 +1319,21 @@ export default function GameCanvas({
 }) {
   const [strokeColor, setStrokeColor] =
     useState(DEFAULT_COLOR)
+
+  const [fillColor, setFillColor] =
+    useState(DEFAULT_COLOR)
+
+  const [colorTarget, setColorTarget] =
+    useState("stroke")
+
+  const [showColorPicker, setShowColorPicker] =
+    useState(false)
+
+  const [pickerHue, setPickerHue] =
+    useState(0)
+
+  const [recentColors, setRecentColors] =
+    useState(() => [...COLORS])
 
   const [strokeWidth, setStrokeWidth] =
     useState(DEFAULT_WIDTH)
@@ -77,21 +1344,40 @@ export default function GameCanvas({
   const [cursorPosition, setCursorPosition] =
     useState(null)
 
-  const canvasRef = useRef(null)
+  const [selectedOperationId, setSelectedOperationId] =
+    useState(null)
 
-  // --------------------------------------------------------------------------
-  // Refs
-  // --------------------------------------------------------------------------
+  const [selectedAnchorIndex, setSelectedAnchorIndex] =
+    useState(null)
 
-  const strokesRef = useRef(
-    Array.isArray(strokes)
-      ? strokes
-      : []
-  )
+  const [showShapeMenu, setShowShapeMenu] =
+    useState(false)
 
-  const drawingRef = useRef(false)
+  const [showEditMenu, setShowEditMenu] =
+    useState(false)
+
+  const [showLayers, setShowLayers] =
+    useState(false)
+
+  const [hiddenLayers, setHiddenLayers] =
+    useState(() => new Set())
+
+  const canvasRef =
+    useRef(null)
+
+  const overlayCanvasRef =
+    useRef(null)
+
+  const liveCanvasRef =
+    useRef(null)
+
+  const drawingRef =
+    useRef(false)
 
   const currentStrokeRef =
+    useRef(null)
+
+  const currentShapeRef =
     useRef(null)
 
   const pendingPointsRef =
@@ -100,17 +1386,52 @@ export default function GameCanvas({
   const lastLiveUpdateRef =
     useRef(0)
 
+  const strokesRef =
+    useRef(
+      Array.isArray(strokes)
+        ? strokes
+        : []
+    )
+
+  const localOperationsRef =
+    useRef([])
+
+  // Resolved drawing is immutable between commits/server updates. Cache it
+  // so selection and edit pointer moves do not repeatedly deep-clone every
+  // stroke in the room.
+  const resolvedCacheRef =
+    useRef({
+      server: null,
+      localVersion: 0,
+      operations: [],
+    })
+
+  const localVersionRef =
+    useRef(0)
+
   const canDrawRef =
     useRef(canDraw)
 
   const strokeColorRef =
     useRef(strokeColor)
 
+  const fillColorRef =
+    useRef(fillColor)
+
+  const colorTargetRef =
+    useRef(colorTarget)
+
   const strokeWidthRef =
     useRef(strokeWidth)
 
   const toolRef =
     useRef(tool)
+
+  const selectedOperationIdRef =
+    useRef(selectedOperationId)
+
+  const selectedAnchorIndexRef =
+    useRef(selectedAnchorIndex)
 
   const onStrokeRef =
     useRef(onStroke)
@@ -124,42 +1445,45 @@ export default function GameCanvas({
   const onClearRef =
     useRef(onClear)
 
-  // Local operations allow fills to appear immediately while the
-  // server round-trip is happening.
-  //
-  // Once the parent receives the operation through ActionCable and
-  // includes it in `strokes`, the local copy is removed.
-  const localOperationsRef =
+  const editRef =
+    useRef(null)
+
+  const layersRef =
     useRef([])
 
-  // --------------------------------------------------------------------------
-  // Keep refs synchronized
-  // --------------------------------------------------------------------------
-
   useEffect(() => {
-    const nextStrokes =
+    strokesRef.current =
       Array.isArray(strokes)
         ? strokes
         : []
 
-    strokesRef.current =
-      nextStrokes
-
     const serverIds =
       new Set(
-        nextStrokes
-          .map((stroke) => stroke?.id)
+        strokesRef.current
+          .map(
+            (operation) =>
+              operation?.id
+          )
           .filter(Boolean)
       )
 
     localOperationsRef.current =
       localOperationsRef.current.filter(
         (operation) =>
-          !serverIds.has(operation.id)
+          !serverIds.has(
+            operation.id
+          )
       )
+
+    localVersionRef.current += 1
+    resolvedCacheRef.current.server = null
 
     renderCanvas()
   }, [strokes])
+
+  useEffect(() => {
+    renderLiveCanvas()
+  }, [liveStrokes])
 
   useEffect(() => {
     canDrawRef.current =
@@ -172,6 +1496,16 @@ export default function GameCanvas({
   }, [strokeColor])
 
   useEffect(() => {
+    fillColorRef.current =
+      fillColor
+  }, [fillColor])
+
+  useEffect(() => {
+    colorTargetRef.current =
+      colorTarget
+  }, [colorTarget])
+
+  useEffect(() => {
     strokeWidthRef.current =
       strokeWidth
   }, [strokeWidth])
@@ -179,7 +1513,22 @@ export default function GameCanvas({
   useEffect(() => {
     toolRef.current =
       tool
+    renderOverlay()
   }, [tool])
+
+  useEffect(() => {
+    selectedOperationIdRef.current =
+      selectedOperationId
+
+    renderOverlay()
+  }, [selectedOperationId])
+
+  useEffect(() => {
+    selectedAnchorIndexRef.current =
+      selectedAnchorIndex
+
+    renderOverlay()
+  }, [selectedAnchorIndex])
 
   useEffect(() => {
     onStrokeRef.current =
@@ -201,10 +1550,6 @@ export default function GameCanvas({
       onClear
   }, [onClear])
 
-  // --------------------------------------------------------------------------
-  // Canvas setup
-  // --------------------------------------------------------------------------
-
   useEffect(() => {
     const canvas =
       canvasRef.current
@@ -215,9 +1560,8 @@ export default function GameCanvas({
 
     setupCanvas()
 
-    function handleResize() {
-      setupCanvas()
-    }
+    const handleResize =
+      () => setupCanvas()
 
     window.addEventListener(
       "resize",
@@ -231,10 +1575,6 @@ export default function GameCanvas({
       )
     }
   }, [])
-
-  // --------------------------------------------------------------------------
-  // Pointer listeners
-  // --------------------------------------------------------------------------
 
   useEffect(() => {
     const canvas =
@@ -307,11 +1647,356 @@ export default function GameCanvas({
     }
   }, [])
 
-  // --------------------------------------------------------------------------
-  // Cursor
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Operation stream
+   * -------------------------------------------------------------------------
+   *
+   * object_update and object_delete are interpreted here.
+   *
+   * This means the server can append edits to the same Round.strokes history
+   * without requiring a second database model.
+   */
 
-  function handleCursorMove(event) {
+  function getResolvedOperations() {
+    const cached =
+      resolvedCacheRef.current
+
+    if (
+      cached.server === strokesRef.current &&
+      cached.localVersion === localVersionRef.current
+    ) {
+      return cached.operations
+    }
+
+    const result = []
+
+    const indexById =
+      new Map()
+
+    const applyOperation =
+      (operation) => {
+        if (!operation) {
+          return
+        }
+
+        if (
+          operation.type ===
+          "layer_reorder"
+        ) {
+          const order =
+            Array.isArray(operation.order)
+              ? operation.order.map(String)
+              : []
+
+          if (order.length > 0) {
+            const rank = new Map(
+              order.map((id, position) => [
+                id,
+                position,
+              ])
+            )
+
+            result.sort((a, b) => {
+              const ar = rank.has(String(a.id))
+                ? rank.get(String(a.id))
+                : order.length + result.indexOf(a)
+
+              const br = rank.has(String(b.id))
+                ? rank.get(String(b.id))
+                : order.length + result.indexOf(b)
+
+              return ar - br
+            })
+
+            indexById.clear()
+            result.forEach((item, itemIndex) => {
+              if (item) {
+                indexById.set(item.id, itemIndex)
+              }
+            })
+          }
+
+          return
+        }
+
+        if (
+          operation.type ===
+          "object_update"
+        ) {
+          const index =
+            indexById.get(
+              operation.objectId
+            )
+
+          if (
+            index == null
+          ) {
+            return
+          }
+
+          result[index] = {
+            ...result[index],
+            ...cloneOperation(
+              operation.changes ||
+                {}
+            ),
+          }
+
+          return
+        }
+
+        if (
+          operation.type ===
+          "object_delete"
+        ) {
+          const index =
+            indexById.get(
+              operation.objectId
+            )
+
+          if (
+            index == null
+          ) {
+            return
+          }
+
+          result[index] = null
+          return
+        }
+
+        if (
+          operation.type ===
+          "layer_reorder"
+        ) {
+          const order =
+            Array.isArray(operation.order)
+              ? operation.order
+              : []
+
+          if (order.length > 0) {
+            const rank =
+              new Map(
+                order.map(
+                  (id, position) => [
+                    id,
+                    position,
+                  ]
+                )
+              )
+
+            result.sort(
+              (a, b) => {
+                const ar =
+                  rank.has(a.id)
+                    ? rank.get(a.id)
+                    : order.length + 100000 + result.indexOf(a)
+                const br =
+                  rank.has(b.id)
+                    ? rank.get(b.id)
+                    : order.length + 100000 + result.indexOf(b)
+                return ar - br
+              }
+            )
+
+            indexById.clear()
+            result.forEach(
+              (item, itemIndex) => {
+                if (item) {
+                  indexById.set(
+                    item.id,
+                    itemIndex
+                  )
+                }
+              }
+            )
+          }
+
+          return
+        }
+
+        if (
+          operation.type ===
+          "object_restore"
+        ) {
+          const index =
+            indexById.get(
+              operation.objectId
+            )
+
+          if (
+            index != null
+          ) {
+            result[index] =
+              cloneOperation(
+                operation.object
+              )
+          }
+
+          return
+        }
+
+        if (
+          operation.type ===
+          "erase"
+        ) {
+          return
+        }
+
+        indexById.set(
+          operation.id,
+          result.length
+        )
+
+        result.push(
+          cloneOperation(
+            operation
+          )
+        )
+      }
+
+    for (
+      const operation of
+        strokesRef.current
+    ) {
+      applyOperation(
+        operation
+      )
+    }
+
+    for (
+      const operation of
+        localOperationsRef.current
+    ) {
+      const alreadyExists =
+        strokesRef.current.some(
+          (serverOperation) =>
+            serverOperation?.id ===
+            operation?.id
+        )
+
+      if (!alreadyExists) {
+        applyOperation(
+          operation
+        )
+      }
+    }
+
+    const resolved =
+      result.filter(Boolean)
+
+    cached.server = strokesRef.current
+    cached.localVersion = localVersionRef.current
+    cached.operations = resolved
+
+    return resolved
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Canvas setup
+   * -------------------------------------------------------------------------
+   */
+
+  function setupCanvas() {
+    const canvas =
+      canvasRef.current
+
+    const overlay =
+      overlayCanvasRef.current
+
+    const live =
+      liveCanvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    const dpr =
+      window.devicePixelRatio ||
+      1
+
+    canvas.width =
+      CANVAS_WIDTH * dpr
+
+    canvas.height =
+      CANVAS_HEIGHT * dpr
+
+    canvas.style.aspectRatio =
+      `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`
+
+    if (live) {
+      live.width =
+        CANVAS_WIDTH * dpr
+
+      live.height =
+        CANVAS_HEIGHT * dpr
+
+      live.style.aspectRatio =
+        `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`
+    }
+
+    if (overlay) {
+      overlay.width =
+        CANVAS_WIDTH * dpr
+
+      overlay.height =
+        CANVAS_HEIGHT * dpr
+
+      overlay.style.aspectRatio =
+        `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`
+    }
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer conversion
+   * -------------------------------------------------------------------------
+   */
+
+  function getNormalizedPoint(
+    canvas,
+    event
+  ) {
+    const rect =
+      canvas.getBoundingClientRect()
+
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0
+    ) {
+      return [0, 0]
+    }
+
+    return [
+      clamp(
+        (
+          event.clientX -
+          rect.left
+        ) /
+          rect.width,
+        0,
+        1
+      ),
+
+      clamp(
+        (
+          event.clientY -
+          rect.top
+        ) /
+          rect.height,
+        0,
+        1
+      ),
+    ]
+  }
+
+  function handleCursorMove(
+    event
+  ) {
     if (!canDrawRef.current) {
       setCursorPosition(null)
       return
@@ -345,61 +2030,52 @@ export default function GameCanvas({
     })
   }
 
+  const handleClear = () => {
+    if (!canDraw) return
+
+    // Clear local editing state
+    selectedOperationIdRef.current = null
+    selectedAnchorIndexRef.current = null
+
+    setSelectedOperationId(null)
+    setSelectedAnchorIndex(null)
+
+    // Clear any active interaction
+    drawingRef.current = false
+    currentStrokeRef.current = null
+    currentShapeRef.current = null
+    editRef.current = null
+
+    // Clear all canvases immediately
+    const canvases = [
+      canvasRef.current,
+      overlayCanvasRef.current,
+    ]
+
+    canvases.forEach((canvas) => {
+      if (!canvas) return
+
+      const ctx = canvas.getContext("2d")
+      ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
+    })
+
+    // Tell the game/server to clear the round's drawing.
+    onClearRef.current?.()
+  }
+
   function handleCursorLeave() {
     setCursorPosition(null)
   }
 
-  // --------------------------------------------------------------------------
-  // Canvas sizing
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer down
+   * -------------------------------------------------------------------------
+   */
 
-  function setupCanvas() {
-    const canvas =
-      canvasRef.current
-
-    if (!canvas) {
-      return
-    }
-
-    const dpr =
-      window.devicePixelRatio || 1
-
-    canvas.width =
-      CANVAS_WIDTH * dpr
-
-    canvas.height =
-      CANVAS_HEIGHT * dpr
-
-    canvas.style.aspectRatio =
-      `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}`
-
-    const context =
-      canvas.getContext("2d")
-
-    if (!context) {
-      return
-    }
-
-    context.setTransform(
-      dpr,
-      0,
-      0,
-      dpr,
-      0,
-      0
-    )
-
-    context.imageSmoothingEnabled =
-      true
-
-    renderCanvas()
-  }
-
-  // --------------------------------------------------------------------------
-  // Pointer down
-  // --------------------------------------------------------------------------
-
-  function handlePointerDown(event) {
+  function handlePointerDown(
+    event
+  ) {
     if (!canDrawRef.current) {
       return
     }
@@ -413,63 +2089,191 @@ export default function GameCanvas({
       return
     }
 
-    const currentTool =
-      toolRef.current
-
     const point =
       getNormalizedPoint(
         canvas,
         event
       )
 
-    // ------------------------------------------------------------------------
-    // Bucket
-    // ------------------------------------------------------------------------
+    const currentTool =
+      toolRef.current
+
+    /*
+     * SELECT
+     */
+
+    if (
+      currentTool ===
+      TOOLS.SELECT
+    ) {
+      handleSelectDown(
+        point,
+        event
+      )
+      return
+    }
+
+    /*
+     * ANCHOR / CURVE
+     */
+
+    if (
+      currentTool ===
+        TOOLS.ANCHOR ||
+      currentTool ===
+        TOOLS.CURVE
+    ) {
+      handleEditDown(
+        point,
+        currentTool,
+        event
+      )
+      return
+    }
+
+    /*
+     * BUCKET
+     */
 
     if (
       currentTool ===
       TOOLS.BUCKET
     ) {
-      handleBucketFill(point)
+      handleBucketFill(
+        point
+      )
       return
     }
 
-    // ------------------------------------------------------------------------
-    // Pencil / Eraser
-    // ------------------------------------------------------------------------
+    /*
+     * ERASER
+     */
 
-    try {
-      canvas.setPointerCapture(
-        event.pointerId
-      )
-    } catch {
-      // Ignore unsupported pointer capture.
-    }
-
-    const isEraser =
+    if (
       currentTool ===
       TOOLS.ERASER
+    ) {
+      beginPointerCapture(
+        canvas,
+        event
+      )
+
+      drawingRef.current =
+        true
+
+      currentStrokeRef.current =
+        {
+          id:
+            createStrokeId(),
+
+          type:
+            "eraser",
+
+          points: [
+            point,
+          ],
+
+          width:
+            Math.max(
+              strokeWidthRef.current *
+                2,
+              12
+            ),
+        }
+
+      pendingPointsRef.current =
+        [point]
+
+      lastLiveUpdateRef.current =
+        performance.now()
+
+      eraseAtPoint(
+        point
+      )
+
+      return
+    }
+
+    /*
+     * SHAPES
+     */
+
+    if (
+      SHAPE_TOOLS.includes(
+        currentTool
+      )
+    ) {
+      beginPointerCapture(
+        canvas,
+        event
+      )
+
+      drawingRef.current =
+        true
+
+      currentShapeRef.current =
+        {
+          id:
+            createStrokeId(),
+          start: point,
+          end: point,
+          shape:
+            currentTool,
+        }
+
+      lastLiveUpdateRef.current =
+        performance.now()
+
+      sendLiveShape({
+        ...currentShapeRef.current,
+        eventType: "start",
+      })
+
+      renderLiveCanvas()
+      return
+    }
+
+    /*
+     * PENCIL / PEN / LINE
+     */
+
+    beginPointerCapture(
+      canvas,
+      event
+    )
+
+    const type =
+      currentTool ===
+      TOOLS.PEN
+        ? "stroke"
+        : "stroke"
 
     const stroke = {
-      id: createStrokeId(),
+      id:
+        createStrokeId(),
 
-      type:
-        isEraser
-          ? "eraser"
-          : "stroke",
+      type,
 
-      points: [point],
+      pen:
+        currentTool ===
+        TOOLS.PEN,
+
+      closed: false,
+
+      points: [
+        point,
+      ],
 
       color:
         strokeColorRef.current,
 
+      fill:
+        currentTool === TOOLS.PEN
+          ? fillColorRef.current
+          : null,
+
       width:
-        isEraser
-          ? Math.max(
-              strokeWidthRef.current * 2,
-              12
-            )
-          : strokeWidthRef.current,
+        strokeWidthRef.current,
     }
 
     drawingRef.current =
@@ -478,23 +2282,52 @@ export default function GameCanvas({
     currentStrokeRef.current =
       stroke
 
-    pendingPointsRef.current = [
-      point,
-    ]
+    pendingPointsRef.current =
+      [point]
 
     lastLiveUpdateRef.current =
       performance.now()
 
-    renderCanvas()
+    renderLiveCanvas()
 
-    sendLiveStart(stroke)
+    sendLiveStart(
+      stroke
+    )
   }
 
-  // --------------------------------------------------------------------------
-  // Pointer move
-  // --------------------------------------------------------------------------
+  function beginPointerCapture(
+    canvas,
+    event
+  ) {
+    try {
+      canvas.setPointerCapture(
+        event.pointerId
+      )
+    } catch {
+      // Ignore unsupported pointer capture.
+    }
+  }
 
-  function handlePointerMove(event) {
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer move
+   * -------------------------------------------------------------------------
+   */
+
+  function handlePointerMove(
+    event
+  ) {
+    if (editRef.current) {
+      const canvas = canvasRef.current
+      if (!canvas) return
+
+      event.preventDefault()
+      handleEditMove(
+        getNormalizedPoint(canvas, event)
+      )
+      return
+    }
+
     if (!drawingRef.current) {
       return
     }
@@ -512,6 +2345,78 @@ export default function GameCanvas({
       return
     }
 
+    const point =
+      getNormalizedPoint(
+        canvas,
+        event
+      )
+
+    const currentTool =
+      toolRef.current
+
+    /*
+     * Shape preview.
+     */
+
+    if (
+      SHAPE_TOOLS.includes(
+        currentTool
+      )
+    ) {
+      if (
+        currentShapeRef.current
+      ) {
+        currentShapeRef.current.end =
+          point
+
+        renderLiveCanvas()
+
+        const now =
+          performance.now()
+
+        if (
+          now -
+            lastLiveUpdateRef.current >=
+          LIVE_UPDATE_INTERVAL
+        ) {
+          sendLiveShape(
+            currentShapeRef.current
+          )
+        }
+      }
+
+      return
+    }
+
+    /*
+     * Eraser.
+     */
+
+    if (
+      currentTool ===
+      TOOLS.ERASER
+    ) {
+      const stroke =
+        currentStrokeRef.current
+
+      if (
+        stroke &&
+        addPointToCurrentStroke(
+          point
+        )
+      ) {
+        eraseAtPoint(
+          point
+        )
+      }
+
+      return
+    }
+
+    /*
+     * Normal drawing.
+     */
+
     const stroke =
       currentStrokeRef.current
 
@@ -519,20 +2424,19 @@ export default function GameCanvas({
       return
     }
 
-    const pointerEvents =
+    const events =
       typeof event.getCoalescedEvents ===
       "function"
         ? event.getCoalescedEvents()
         : [event]
 
-    let addedAny =
-      false
+    let addedAny = false
 
     for (
       const pointerEvent of
-        pointerEvents
+        events
     ) {
-      const point =
+      const nextPoint =
         getNormalizedPoint(
           canvas,
           pointerEvent
@@ -540,15 +2444,14 @@ export default function GameCanvas({
 
       if (
         addPointToCurrentStroke(
-          point
+          nextPoint
         )
       ) {
         pendingPointsRef.current.push(
-          point
+          nextPoint
         )
 
-        addedAny =
-          true
+        addedAny = true
       }
     }
 
@@ -556,7 +2459,22 @@ export default function GameCanvas({
       return
     }
 
-    renderCanvas()
+    if (stroke.pen) {
+      stroke.closed =
+        shouldSnapPenClosed(
+          stroke.points
+        )
+
+      // Once a Pen has enough points to form a shape, keep its selected
+      // fill on the operation instead of clearing it during pointer moves.
+      if (stroke.closed) {
+        stroke.fill =
+          stroke.fill ||
+          fillColorRef.current
+      }
+    }
+
+    renderLiveCanvas()
 
     const now =
       performance.now()
@@ -570,11 +2488,21 @@ export default function GameCanvas({
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Pointer up
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer up
+   * -------------------------------------------------------------------------
+   */
 
-  function handlePointerUp(event) {
+  function handlePointerUp(
+    event
+  ) {
+    if (editRef.current) {
+      event.preventDefault()
+      finishEdit(event)
+      return
+    }
+
     if (!drawingRef.current) {
       return
     }
@@ -584,8 +2512,109 @@ export default function GameCanvas({
     const canvas =
       canvasRef.current
 
+    const currentTool =
+      toolRef.current
+
+    drawingRef.current =
+      false
+
+    /*
+     * Shape.
+     */
+
+    if (
+      SHAPE_TOOLS.includes(
+        currentTool
+      )
+    ) {
+      const shape =
+        currentShapeRef.current
+
+      currentShapeRef.current =
+        null
+
+      releasePointerCapture(
+        canvas,
+        event
+      )
+
+      if (!shape) {
+        renderLiveCanvas()
+        return
+      }
+
+      const operation =
+        makeShapeOperation(
+          shape.shape,
+          shape.start,
+          shape.end,
+          strokeColorRef.current,
+          strokeWidthRef.current,
+          fillColorRef.current
+        )
+
+      operation.id =
+        shape.id
+
+      /*
+       * Ignore accidental taps before publishing a final live snapshot.
+       */
+
+      if (
+        operation.bounds.width <
+          0.002 &&
+        operation.bounds.height <
+          0.002
+      ) {
+        renderLiveCanvas()
+        return
+      }
+
+      // Send one final shape snapshot so remote canvases reach the exact
+      // geometry immediately before the persisted stroke is broadcast.
+      sendLiveShape(
+        {
+          ...shape,
+          operation,
+        }
+      )
+
+      commitOperation(
+        operation
+      )
+
+      return
+    }
+
+    /*
+     * Eraser.
+     */
+
+    if (
+      currentTool ===
+      TOOLS.ERASER
+    ) {
+      currentStrokeRef.current =
+        null
+
+      pendingPointsRef.current =
+        []
+
+      releasePointerCapture(
+        canvas,
+        event
+      )
+
+      renderLiveCanvas()
+      return
+    }
+
+    /*
+     * Normal stroke.
+     */
+
     if (canvas) {
-      const pointerEvents =
+      const events =
         typeof event.getCoalescedEvents ===
         "function"
           ? event.getCoalescedEvents()
@@ -593,7 +2622,7 @@ export default function GameCanvas({
 
       for (
         const pointerEvent of
-          pointerEvents
+          events
       ) {
         const point =
           getNormalizedPoint(
@@ -615,11 +2644,11 @@ export default function GameCanvas({
 
     sendPendingPoints()
 
-    drawingRef.current =
-      false
-
     const stroke =
       currentStrokeRef.current
+
+    drawingRef.current =
+      false
 
     currentStrokeRef.current =
       null
@@ -627,23 +2656,13 @@ export default function GameCanvas({
     pendingPointsRef.current =
       []
 
-    try {
-      if (
-        canvas &&
-        canvas.hasPointerCapture(
-          event.pointerId
-        )
-      ) {
-        canvas.releasePointerCapture(
-          event.pointerId
-        )
-      }
-    } catch {
-      // Pointer capture may already be released.
-    }
+    releasePointerCapture(
+      canvas,
+      event
+    )
 
     if (!stroke) {
-      renderCanvas()
+      renderLiveCanvas()
       return
     }
 
@@ -653,48 +2672,85 @@ export default function GameCanvas({
       ) ||
       stroke.points.length === 0
     ) {
-      renderCanvas()
+      renderLiveCanvas()
       return
     }
 
+    const completedPoints =
+      currentTool === TOOLS.PEN
+        ? preparePenPoints(stroke.points)
+        : clonePoints(stroke.points)
+
+    const penClosed =
+      currentTool === TOOLS.PEN &&
+      stroke.points.length >= 3
+
+    const completedPenPoints =
+      penClosed
+        ? snapPenClosed(completedPoints)
+        : completedPoints
+
     const completedStroke = {
       ...stroke,
-
-      points: [
-        ...stroke.points,
-      ],
+      points: completedPenPoints,
+      closed: penClosed,
+      fill:
+        currentTool === TOOLS.PEN && penClosed
+          ? (
+              stroke.fill ||
+              fillColorRef.current
+            )
+          : null,
     }
 
-    if (
-      typeof onStrokeRef.current ===
-      "function"
-    ) {
-      onStrokeRef.current(
-        completedStroke
+    completedStroke.bounds =
+      calculateBoundsFromPoints(
+        completedStroke.points
       )
-    }
 
-    renderCanvas()
+    commitOperation(
+      completedStroke
+    )
   }
 
-  // --------------------------------------------------------------------------
-  // Pointer cancel
-  // --------------------------------------------------------------------------
+  function handlePointerCancel(
+    event
+  ) {
+    if (editRef.current) {
+      editRef.current = null
+      selectedAnchorIndexRef.current = null
+      setSelectedAnchorIndex(null)
+      releasePointerCapture(canvasRef.current, event)
+      renderOverlay()
+      return
+    }
 
-  function handlePointerCancel(event) {
     drawingRef.current =
       false
 
     currentStrokeRef.current =
       null
 
+    currentShapeRef.current =
+      null
+
     pendingPointsRef.current =
       []
 
-    try {
-      const canvas =
-        canvasRef.current
+    releasePointerCapture(
+      canvasRef.current,
+      event
+    )
 
+    renderCanvas()
+    renderLiveCanvas()
+  }
+
+  function releasePointerCapture(
+    canvas,
+    event
+  ) {
+    try {
       if (
         canvas &&
         event.pointerId != null &&
@@ -709,13 +2765,13 @@ export default function GameCanvas({
     } catch {
       // Ignore pointer capture errors.
     }
-
-    renderCanvas()
   }
 
-  // --------------------------------------------------------------------------
-  // Add point
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Drawing points
+   * -------------------------------------------------------------------------
+   */
 
   function addPointToCurrentStroke(
     point
@@ -730,19 +2786,24 @@ export default function GameCanvas({
     const points =
       stroke.points
 
-    if (points.length === 0) {
+    if (
+      points.length === 0
+    ) {
       points.push(point)
       return true
     }
 
     const previous =
-      points[points.length - 1]
+      points[
+        points.length - 1
+      ]
 
     if (
       normalizedDistance(
         previous,
         point
-      ) < MIN_POINT_DISTANCE
+      ) <
+      MIN_POINT_DISTANCE
     ) {
       return false
     }
@@ -752,11 +2813,46 @@ export default function GameCanvas({
     return true
   }
 
-  // --------------------------------------------------------------------------
-  // Live drawing - start
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Commit
+   * -------------------------------------------------------------------------
+   */
 
-  function sendLiveStart(stroke) {
+  function commitOperation(
+    operation
+  ) {
+    if (!operation) {
+      return
+    }
+
+    localOperationsRef.current.push(
+      operation
+    )
+    localVersionRef.current += 1
+
+    if (
+      typeof onStrokeRef.current ===
+      "function"
+    ) {
+      onStrokeRef.current(
+        operation
+      )
+    }
+
+    renderCanvas()
+    renderLiveCanvas()
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Live drawing
+   * -------------------------------------------------------------------------
+   */
+
+  function sendLiveStart(
+    stroke
+  ) {
     const callback =
       onLiveStrokeRef.current
 
@@ -771,28 +2867,74 @@ export default function GameCanvas({
       type: "start",
 
       stroke: {
-        id: stroke.id,
+        id:
+          stroke.id,
 
         type:
           stroke.type ||
           "stroke",
 
-        points: [
-          ...stroke.points,
-        ],
+        points:
+          clonePoints(
+            stroke.points
+          ),
 
         color:
           stroke.color,
 
         width:
           stroke.width,
+
+        pen:
+          Boolean(stroke.pen),
+
+        closed:
+          Boolean(stroke.closed),
+
+        fill:
+          stroke.fill || null,
       },
     })
   }
 
-  // --------------------------------------------------------------------------
-  // Live drawing - points
-  // --------------------------------------------------------------------------
+  function sendLiveShape(shape) {
+    const callback =
+      onLiveStrokeRef.current
+
+    if (typeof callback !== "function" || !shape) {
+      return
+    }
+
+    const operation =
+      shape.operation ||
+      makeShapeOperation(
+        shape.shape,
+        shape.start,
+        shape.end,
+        strokeColorRef.current,
+        strokeWidthRef.current,
+        fillColorRef.current
+      )
+
+    // Reuse the same identity for the live preview and the committed
+    // operation so the final ActionCable broadcast can collapse cleanly
+    // into the optimistic local operation.
+    const liveOperation = {
+      ...operation,
+      id:
+        shape.operation?.id ||
+        shape.id ||
+        operation.id,
+    }
+
+    callback({
+      type: "start" === shape.eventType ? "start" : "points",
+      stroke: cloneOperation(liveOperation),
+    })
+
+    lastLiveUpdateRef.current =
+      performance.now()
+  }
 
   function sendPendingPoints() {
     const callback =
@@ -828,21 +2970,32 @@ export default function GameCanvas({
       type: "points",
 
       stroke: {
-        id: stroke.id,
+        id:
+          stroke.id,
 
         type:
           stroke.type ||
           "stroke",
 
-        points: [
-          ...points,
-        ],
+        points:
+          clonePoints(
+            points
+          ),
 
         color:
           stroke.color,
 
         width:
           stroke.width,
+
+        pen:
+          Boolean(stroke.pen),
+
+        closed:
+          Boolean(stroke.closed),
+
+        fill:
+          stroke.fill || null,
       },
     })
 
@@ -853,15 +3006,380 @@ export default function GameCanvas({
       performance.now()
   }
 
-  // --------------------------------------------------------------------------
-  // Bucket fill
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Selection
+   * -------------------------------------------------------------------------
+   */
 
-  function handleBucketFill(point) {
-    if (!canDrawRef.current) {
+  function handleSelectDown(
+    point,
+    event
+  ) {
+    const operations =
+      getResolvedOperations()
+
+    let found = null
+
+    for (
+      let i =
+        operations.length - 1;
+      i >= 0;
+      i -= 1
+    ) {
+      const operation =
+        operations[i]
+
+      if (
+        hiddenLayers.has(
+          operation.id
+        )
+      ) {
+        continue
+      }
+
+      if (
+        operationContainsPoint(
+          null,
+          operation,
+          point
+        )
+      ) {
+        found =
+          operation
+        break
+      }
+    }
+
+    if (!found) {
+      setSelectedOperationId(
+        null
+      )
+
+      editRef.current =
+        null
+
+      renderCanvas()
+      renderLiveCanvas()
+      renderOverlay()
       return
     }
 
+    setSelectedOperationId(
+      found.id
+    )
+
+    editRef.current = {
+      type: "move",
+      operationId:
+        found.id,
+      start:
+        clonePoint(point),
+      last:
+        clonePoint(point),
+      changed: false,
+      previewOperation: null,
+    }
+
+    selectedOperationIdRef.current =
+      found.id
+
+    beginCanvasEditCapture(event)
+
+    renderCanvas(found.id)
+    renderLiveCanvas()
+    renderOverlay()
+  }
+
+  function getSelectedOperation() {
+    const id =
+      selectedOperationIdRef.current
+
+    if (!id) {
+      return null
+    }
+
+    return getResolvedOperations()
+      .find(
+        (operation) =>
+          operation.id === id
+      )
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Selection drag
+   * -------------------------------------------------------------------------
+   */
+
+  function handleSelectedMove(
+    point
+  ) {
+    const edit =
+      editRef.current
+
+    if (
+      !edit ||
+      edit.operationId == null
+    ) {
+      return
+    }
+
+    const operation =
+      getSelectedOperation()
+
+    if (!operation) {
+      return
+    }
+
+    const dx =
+      point[0] -
+      edit.last[0]
+
+    const dy =
+      point[1] -
+      edit.last[1]
+
+    if (
+      Math.abs(dx) <
+        0.000001 &&
+      Math.abs(dy) <
+        0.000001
+    ) {
+      return
+    }
+
+    edit.last =
+      point
+
+    edit.changed =
+      true
+
+    const updated =
+      moveOperation(
+        operation,
+        dx,
+        dy
+      )
+
+    /*
+     * Replace the local resolved representation with an update operation.
+     */
+    const update = {
+      id:
+        createStrokeId(),
+
+      type:
+        "object_update",
+
+      objectId:
+        operation.id,
+
+      changes:
+        updated,
+    }
+
+      /*
+     * For continuous dragging we do NOT emit an operation on every
+     * pointermove. We mutate the local representation and emit one
+     * object_update when the drag finishes.
+     *
+     * This keeps ActionCable traffic sane on mobile.
+     */
+    editRef.current.previewOperation =
+      updated
+
+    updateLocalOperation(
+      operation.id,
+      updated
+    )
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer handling for Select / Anchor / Curve
+   * -------------------------------------------------------------------------
+   */
+
+  function handleEditDown(
+    point,
+    currentTool,
+    event
+  ) {
+    const operations =
+      getResolvedOperations()
+
+    /*
+     * Anchor / Curve require a Pen-like operation.
+     *
+     * If nothing is selected yet, select the topmost drawable operation.
+     */
+    let operation =
+      getSelectedOperation()
+
+    if (!operation) {
+      for (
+        let i =
+          operations.length - 1;
+        i >= 0;
+        i -= 1
+      ) {
+        const candidate =
+          operations[i]
+
+        if (
+          hiddenLayers.has(
+            candidate.id
+          )
+        ) {
+          continue
+        }
+
+        if (
+          operationContainsPoint(
+            null,
+            candidate,
+            point
+          )
+        ) {
+          operation =
+            candidate
+          break
+        }
+      }
+    }
+
+    if (!operation) {
+      setSelectedOperationId(
+        null
+      )
+      setSelectedAnchorIndex(
+        null
+      )
+      editRef.current =
+        null
+      renderOverlay()
+      return
+    }
+
+    setSelectedOperationId(
+      operation.id
+    )
+
+    selectedOperationIdRef.current =
+      operation.id
+
+    renderCanvas(operation.id)
+    renderLiveCanvas()
+
+    /*
+     * Anchor editing works against actual points.
+     *
+     * We intentionally don't require a separate anchor data structure for
+     * the game canvas. This keeps the wire format compatible with the
+     * existing normalized stroke representation.
+     */
+    if (
+      currentTool ===
+      TOOLS.ANCHOR
+    ) {
+      const index =
+        findNearestPointIndex(
+          operation,
+          point
+        )
+
+      if (
+        index == null
+      ) {
+        setSelectedAnchorIndex(
+          null
+        )
+        renderOverlay()
+        return
+      }
+
+      setSelectedAnchorIndex(
+        index
+      )
+
+      selectedAnchorIndexRef.current =
+        index
+
+      editRef.current = {
+        type: "anchor",
+        operationId:
+          operation.id,
+        anchorIndex:
+          index,
+        start:
+          clonePoint(point),
+        last:
+          clonePoint(point),
+        changed: false,
+        previewOperation:
+          cloneOperation(operation),
+      }
+
+      beginCanvasEditCapture(event)
+
+      return
+    }
+
+    /*
+     * Curve editing selects a point and gives it a soft Bézier-style
+     * adjustment. We keep the underlying points format intact by moving
+     * neighboring points rather than introducing a new server format.
+     */
+    if (
+      currentTool ===
+      TOOLS.CURVE
+    ) {
+      const index =
+        findNearestPointIndex(
+          operation,
+          point
+        )
+
+      if (
+        index == null
+      ) {
+        renderOverlay()
+        return
+      }
+
+      setSelectedAnchorIndex(
+        index
+      )
+
+      selectedAnchorIndexRef.current =
+        index
+
+      editRef.current = {
+        type: "curve",
+        operationId:
+          operation.id,
+        anchorIndex:
+          index,
+        start:
+          clonePoint(point),
+        last:
+          clonePoint(point),
+        changed: false,
+        previewOperation:
+          cloneOperation(operation),
+      }
+
+      beginCanvasEditCapture(event)
+
+      return
+    }
+  }
+
+  function beginCanvasEditCapture(event) {
     const canvas =
       canvasRef.current
 
@@ -869,36 +3387,1020 @@ export default function GameCanvas({
       return
     }
 
-    const operation = {
-      id: createStrokeId(),
+    try {
+      canvas.setPointerCapture(
+        event?.pointerId
+      )
+    } catch {
+      /*
+       * Selection editing can still work without pointer capture.
+       */
+    }
+  }
 
-      type: "fill",
+  function findNearestPointIndex(
+    operation,
+    point
+  ) {
+    const points =
+      Array.isArray(
+        operation?.points
+      )
+        ? operation.points
+        : null
 
-      point: [
-        point[0],
-        point[1],
-      ],
-
-      color:
-        strokeColorRef.current,
+    if (
+      !points ||
+      points.length === 0
+    ) {
+      return null
     }
 
-    // Render the drawing first so the flood-fill operates on the
-    // exact current visual state.
-    renderCanvas()
+    const threshold =
+      Math.max(
+        0.025,
+        (
+          operation.width ||
+          DEFAULT_WIDTH
+        ) /
+          CANVAS_SIZE *
+          3
+      )
 
-    // Apply immediately to the local canvas.
-    applyFillOperation(
-      canvas,
-      operation
+    let bestIndex =
+      null
+
+    let bestDistance =
+      Infinity
+
+    for (
+      let i = 0;
+      i < points.length;
+      i += 1
+    ) {
+      const distance =
+        pointDistance(
+          points[i],
+          point
+        )
+
+      if (
+        distance <
+          bestDistance &&
+        distance <=
+          threshold
+      ) {
+        bestDistance =
+          distance
+        bestIndex =
+          i
+      }
+    }
+
+    return bestIndex
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Local operation mutation
+   * -------------------------------------------------------------------------
+   *
+   * We keep an edited copy locally until the server's authoritative
+   * operation_update comes back.
+   */
+
+  function updateLocalOperation(
+    operationId,
+    updated
+  ) {
+    const existing =
+      localOperationsRef.current.find(
+        (operation) =>
+          operation.id ===
+          operationId
+      )
+
+    if (existing) {
+      Object.assign(
+        existing,
+        cloneOperation(
+          updated
+        )
+      )
+      localVersionRef.current += 1
+
+      return
+    }
+
+    /*
+     * The object may be server-authoritative. Add a local update operation
+     * rather than copying the entire drawing.
+     */
+    localOperationsRef.current.push({
+      id:
+        createStrokeId(),
+
+      type:
+        "object_update",
+
+      objectId:
+        operationId,
+
+      changes:
+        cloneOperation(
+          updated
+        ),
+    })
+    localVersionRef.current += 1
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Move operation
+   * -------------------------------------------------------------------------
+   */
+
+  function moveOperation(
+    operation,
+    dx,
+    dy
+  ) {
+    const updated =
+      cloneOperation(operation)
+
+    const movePoint = (point) => [
+      clamp(point[0] + dx, 0, 1),
+      clamp(point[1] + dy, 0, 1),
+    ]
+
+    if (Array.isArray(updated.points)) {
+      updated.points = updated.points.map(movePoint)
+      updated.bounds = calculateBoundsFromPoints(updated.points)
+      return updated
+    }
+
+    if (updated.start && updated.end) {
+      updated.start = movePoint(updated.start)
+      updated.end = movePoint(updated.end)
+      updated.bounds = calculateBoundsFromPoints([
+        updated.start,
+        updated.end,
+      ])
+      return updated
+    }
+
+    if (updated.bounds) {
+      updated.bounds = {
+        ...updated.bounds,
+        x: clamp(updated.bounds.x + dx, 0, 1),
+        y: clamp(updated.bounds.y + dy, 0, 1),
+      }
+    }
+
+    return updated
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer move continuation for selection editing
+   * -------------------------------------------------------------------------
+   */
+
+  function handleEditMove(
+    point
+  ) {
+    const edit =
+      editRef.current
+
+    if (!edit) {
+      return
+    }
+
+    const selectedOperation =
+      getSelectedOperation()
+
+    if (!selectedOperation) {
+      return
+    }
+
+    const operation =
+      edit.previewOperation ||
+      selectedOperation
+
+    const dx =
+      point[0] -
+      edit.last[0]
+
+    const dy =
+      point[1] -
+      edit.last[1]
+
+    if (
+      Math.abs(dx) <
+        0.000001 &&
+      Math.abs(dy) <
+        0.000001
+    ) {
+      return
+    }
+
+    /*
+     * First actual movement establishes the edit.
+     */
+    edit.changed =
+      true
+
+    edit.last =
+      clonePoint(point)
+
+    if (
+      edit.type ===
+      "move"
+    ) {
+      edit.deltaX =
+        (edit.deltaX || 0) + dx
+      edit.deltaY =
+        (edit.deltaY || 0) + dy
+
+      renderLiveCanvas()
+      renderOverlay()
+
+      return
+    }
+
+    /*
+     * Anchor editing.
+     */
+    if (
+      edit.type ===
+      "anchor"
+    ) {
+      const updated =
+        cloneOperation(
+          operation
+        )
+
+      if (
+        Array.isArray(
+          updated.points
+        ) &&
+        updated.points[
+          edit.anchorIndex
+        ]
+      ) {
+        updated.points[
+          edit.anchorIndex
+        ][0] += dx
+
+        updated.points[
+          edit.anchorIndex
+        ][1] += dy
+
+        updated.bounds =
+          calculateBoundsFromPoints(
+            updated.points
+          )
+
+      }
+
+      edit.previewOperation = updated
+      renderLiveCanvas()
+      renderOverlay()
+
+      return
+    }
+
+    /*
+     * Curve editing.
+     *
+     * Move the selected point and gently move its immediate neighbors in
+     * the opposite direction. The resulting polyline is then rendered with
+     * the normal quadratic smoothing already used by the canvas.
+     */
+    if (
+      edit.type ===
+      "curve"
+    ) {
+      const updated =
+        cloneOperation(
+          operation
+        )
+
+      const points =
+        updated.points
+
+      if (
+        !Array.isArray(
+          points
+        ) ||
+        !points[
+          edit.anchorIndex
+        ]
+      ) {
+        return
+      }
+
+      points[
+        edit.anchorIndex
+      ][0] += dx
+
+      points[
+        edit.anchorIndex
+      ][1] += dy
+
+      const neighborOffset =
+        0.35
+
+      if (
+        points[
+          edit.anchorIndex - 1
+        ]
+      ) {
+        points[
+          edit.anchorIndex - 1
+        ][0] -=
+          dx *
+          neighborOffset
+
+        points[
+          edit.anchorIndex - 1
+        ][1] -=
+          dy *
+          neighborOffset
+      }
+
+      if (
+        points[
+          edit.anchorIndex + 1
+        ]
+      ) {
+        points[
+          edit.anchorIndex + 1
+        ][0] -=
+          dx *
+          neighborOffset
+
+        points[
+          edit.anchorIndex + 1
+        ][1] -=
+          dy *
+          neighborOffset
+      }
+
+      updated.bounds =
+        calculateBoundsFromPoints(
+          points
+        )
+
+      edit.previewOperation = updated
+      renderLiveCanvas()
+      renderOverlay()
+    }
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer move wrapper
+   * -------------------------------------------------------------------------
+   */
+
+  const originalHandlePointerMove =
+    handlePointerMove
+
+  /*
+   * The event listener installed in the effect above points at the function
+   * declared earlier, so we handle selection editing by routing through the
+   * editRef at the top-level handler.
+   */
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer up edit finalization
+   * -------------------------------------------------------------------------
+   */
+
+  function finishEdit(
+    event
+  ) {
+    const edit =
+      editRef.current
+
+    if (!edit) {
+      return
+    }
+
+    releasePointerCapture(
+      canvasRef.current,
+      event
     )
 
-    // Keep the operation around until the server sends it back.
+    editRef.current =
+      null
+
+    if (
+      !edit.changed
+    ) {
+      renderOverlay()
+      return
+    }
+
+    const selectedOperation =
+      getSelectedOperation()
+
+    if (!selectedOperation) {
+      return
+    }
+
+    const operation =
+      edit.type === "move"
+        ? moveOperation(
+            selectedOperation,
+            edit.deltaX || 0,
+            edit.deltaY || 0
+          )
+        : (edit.previewOperation || selectedOperation)
+
+    if (!operation) {
+      return
+    }
+
+    /*
+     * Emit exactly one update for the entire drag.
+     */
+    const update =
+      {
+        id:
+          createStrokeId(),
+
+        type:
+          "object_update",
+
+        objectId:
+          operation.id,
+
+        changes:
+          cloneOperation(
+            operation
+          ),
+      }
+
+    /*
+     * Remove the local preview updates. The single authoritative update
+     * below replaces them.
+     */
+    localOperationsRef.current =
+      localOperationsRef.current.filter(
+        (local) =>
+          !(
+            local.type ===
+              "object_update" &&
+            local.objectId ===
+              operation.id
+          )
+      )
+
+    localOperationsRef.current.push(
+      update
+    )
+    localVersionRef.current += 1
+
+    if (
+      typeof onStrokeRef.current ===
+      "function"
+    ) {
+      onStrokeRef.current(
+        update
+      )
+    }
+
+    renderCanvas()
+    renderLiveCanvas()
+    renderOverlay()
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Eraser
+   * -------------------------------------------------------------------------
+   */
+
+  function eraseAtPoint(
+    point
+  ) {
+    const operations =
+      getResolvedOperations()
+
+    const radius =
+      clamp(
+        (
+          (
+            strokeWidthRef.current ||
+            DEFAULT_WIDTH
+          ) *
+            2
+        ) /
+          CANVAS_SIZE,
+        ERASER_MIN_RADIUS,
+        ERASER_MAX_RADIUS
+      )
+
+    /*
+     * Erase from topmost object downward.
+     */
+    for (
+      let i =
+        operations.length - 1;
+      i >= 0;
+      i -= 1
+    ) {
+      const operation =
+        operations[i]
+
+      if (
+        hiddenLayers.has(
+          operation.id
+        )
+      ) {
+        continue
+      }
+
+      /*
+       * Don't let an eraser stroke modify the same object repeatedly at
+       * every pointer event if it has already been deleted.
+       */
+      if (
+        !operationContainsPoint(
+          null,
+          operation,
+          point
+        ) &&
+        !operationIntersectsEraser(
+          operation,
+          point,
+          radius
+        )
+      ) {
+        continue
+      }
+
+      const result =
+        eraseOperation(
+          operation,
+          point,
+          radius
+        )
+
+      if (!result) {
+        continue
+      }
+
+      applyEraseResult(
+        operation,
+        result
+      )
+
+      /*
+       * Erase only the topmost object touched by the eraser during a single
+       * pointer event. This feels much more natural when objects overlap.
+       */
+      break
+    }
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function operationIntersectsEraser(
+    operation,
+    point,
+    radius
+  ) {
+    if (
+      Array.isArray(
+        operation?.points
+      )
+    ) {
+      return (
+        pointToPolylineDistance(
+          point,
+          operation.points
+        ) <= radius
+      )
+    }
+
+    if (
+      operation?.type ===
+      "shape"
+    ) {
+      const points =
+        convertShapeToPath(
+          operation
+        )
+
+      return (
+        pointToPolylineDistance(
+          point,
+          points
+        ) <= radius
+      )
+    }
+
+    return false
+  }
+
+  function applyEraseResult(
+    original,
+    result
+  ) {
+    /*
+     * Delete the original object if nothing remains.
+     */
+    if (
+      result.deleted
+    ) {
+      emitObjectDelete(
+        original.id
+      )
+
+      return
+    }
+
+    /*
+     * Replace original geometry.
+     */
+    const replacement =
+      result.operation
+
+    updateLocalOperation(
+      original.id,
+      replacement
+    )
+
+    const update = {
+      id:
+        createStrokeId(),
+
+      type:
+        "object_update",
+
+      objectId:
+        original.id,
+
+      changes:
+        cloneOperation(
+          replacement
+        ),
+    }
+
+    localOperationsRef.current.push(
+      update
+    )
+
+    /*
+     * Additional surviving pieces become new layers.
+     */
+    for (
+      const additional of
+        result.additionalSegments ||
+        []
+    ) {
+      localOperationsRef.current.push(
+        additional
+      )
+
+      if (
+        typeof onStrokeRef.current ===
+        "function"
+      ) {
+        onStrokeRef.current(
+          additional
+        )
+      }
+    }
+
+    if (
+      typeof onStrokeRef.current ===
+      "function"
+    ) {
+      onStrokeRef.current(
+        update
+      )
+    }
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Object style editing
+   * -------------------------------------------------------------------------
+   */
+
+  function updateSelectedStyle(
+    changes
+  ) {
+    const operation =
+      getSelectedOperation()
+
+    if (!operation) {
+      return
+    }
+
+    const updated = {
+      ...cloneOperation(
+        operation
+      ),
+      ...changes,
+    }
+
+    updateLocalOperation(
+      operation.id,
+      updated
+    )
+
+    /*
+     * Remove older local previews for this object.
+     */
+    localOperationsRef.current =
+      localOperationsRef.current.filter(
+        (local) =>
+          !(
+            local.type ===
+              "object_update" &&
+            local.objectId ===
+              operation.id
+          )
+      )
+    localVersionRef.current += 1
+
+    const update = {
+      id:
+        createStrokeId(),
+
+      type:
+        "object_update",
+
+      objectId:
+        operation.id,
+
+      changes:
+        cloneOperation(
+          changes
+        ),
+    }
+
+    localOperationsRef.current.push(
+      update
+    )
+    localVersionRef.current += 1
+
+    if (
+      typeof onStrokeRef.current ===
+      "function"
+    ) {
+      onStrokeRef.current(
+        update
+      )
+    }
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function applyColorToSelection(
+    target,
+    nextColor
+  ) {
+    const operation =
+      getSelectedOperation()
+
+    if (!operation) {
+      return
+    }
+
+    const changes =
+      target === "fill"
+        ? { fill: nextColor }
+        : { color: nextColor }
+
+    updateSelectedStyle(changes)
+  }
+
+  function selectColor(nextColor) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(String(nextColor || ""))) {
+      return
+    }
+
+    const normalizedColor =
+      String(nextColor).toLowerCase()
+
+    const target =
+      colorTargetRef.current
+
+    if (target === "fill") {
+      setFillColor(normalizedColor)
+      fillColorRef.current = normalizedColor
+    } else {
+      setStrokeColor(normalizedColor)
+      strokeColorRef.current = normalizedColor
+    }
+
+    setPickerHue(
+      hexToHsv(normalizedColor).h
+    )
+
+    setRecentColors((current) =>
+      [
+        normalizedColor,
+        ...current.filter(
+          (color) =>
+            color.toLowerCase() !==
+            normalizedColor
+        ),
+      ].slice(0, 12)
+    )
+
+    if (selectedOperationIdRef.current) {
+      applyColorToSelection(
+        target,
+        normalizedColor
+      )
+    }
+  }
+
+  function selectColorTarget(target) {
+    if (
+      target !== "stroke" &&
+      target !== "fill"
+    ) {
+      return
+    }
+
+    colorTargetRef.current = target
+    setColorTarget(target)
+
+    const currentColor =
+      target === "fill"
+        ? fillColorRef.current
+        : strokeColorRef.current
+
+    setPickerHue(
+      hexToHsv(currentColor).h
+    )
+  }
+
+  function handleCustomColorChange(event) {
+    selectColor(event.target.value)
+  }
+
+  function handleHexColorChange(event) {
+    const value =
+      String(event.target.value || "").trim()
+
+    if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+      selectColor(value)
+    }
+  }
+
+  function pickSaturationValue(event) {
+    const rect =
+      event.currentTarget.getBoundingClientRect()
+
+    if (!rect.width || !rect.height) return
+
+    const saturation =
+      clamp(
+        (event.clientX - rect.left) / rect.width,
+        0,
+        1
+      )
+
+    const value =
+      clamp(
+        1 -
+          (event.clientY - rect.top) / rect.height,
+        0,
+        1
+      )
+
+    selectColor(
+      hsvToHex(
+        pickerHue,
+        saturation,
+        value
+      )
+    )
+  }
+
+  function pickHue(event) {
+    const rect =
+      event.currentTarget.getBoundingClientRect()
+
+    if (!rect.width) return
+
+    const hue =
+      clamp(
+        (event.clientX - rect.left) / rect.width,
+        0,
+        1
+      ) * 360
+
+    setPickerHue(hue)
+
+    const currentColor =
+      colorTargetRef.current === "fill"
+        ? fillColorRef.current
+        : strokeColorRef.current
+
+    const hsv =
+      hexToHsv(currentColor)
+
+    selectColor(
+      hsvToHex(
+        hue,
+        hsv.s,
+        hsv.v
+      )
+    )
+  }
+
+  function changeSelectedColor(
+    nextColor
+  ) {
+    selectColor(nextColor)
+  }
+
+  function changeSelectedWidth(
+    nextWidth
+  ) {
+    setStrokeWidth(
+      nextWidth
+    )
+
+    if (
+      selectedOperationIdRef.current
+    ) {
+      updateSelectedStyle({
+        width:
+          nextWidth,
+      })
+    }
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Delete
+   * -------------------------------------------------------------------------
+   */
+
+  function deleteSelected() {
+    const operation =
+      getSelectedOperation()
+
+    if (!operation) {
+      return
+    }
+
+    emitObjectDelete(
+      operation.id
+    )
+
+    setSelectedOperationId(
+      null
+    )
+
+    selectedOperationIdRef.current =
+      null
+
+    setSelectedAnchorIndex(
+      null
+    )
+
+    selectedAnchorIndexRef.current =
+      null
+
+    editRef.current =
+      null
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function emitObjectDelete(
+    objectId
+  ) {
+    const operation = {
+      id:
+        createStrokeId(),
+
+      type:
+        "object_delete",
+
+      objectId,
+    }
+
     localOperationsRef.current.push(
       operation
     )
-
-    renderCanvas()
+    localVersionRef.current += 1
 
     if (
       typeof onStrokeRef.current ===
@@ -910,13 +4412,257 @@ export default function GameCanvas({
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Renderer
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Undo
+   * -------------------------------------------------------------------------
+   */
 
-  function renderCanvas() {
+  function handleUndo() {
+    if (!canDrawRef.current) {
+      return
+    }
+
+    const persisted =
+      Array.isArray(strokesRef.current)
+        ? strokesRef.current
+        : []
+
+    const optimistic =
+      Array.isArray(localOperationsRef.current)
+        ? localOperationsRef.current
+        : []
+
+    const seen = new Set(
+      persisted
+        .map((operation) => String(operation?.id || ""))
+        .filter(Boolean)
+    )
+
+    const history = [
+      ...persisted,
+      ...optimistic.filter((operation) => {
+        const id = String(operation?.id || "")
+        if (!id || seen.has(id)) return false
+        seen.add(id)
+        return true
+      }),
+    ]
+
+    const undoable =
+      new Set([
+        "stroke",
+        "eraser",
+        "fill",
+        "shape",
+        "object_update",
+        "object_delete",
+        "layer_reorder",
+      ])
+
+    let lastAction = null
+
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const candidate = history[i]
+      if (
+        candidate?.id &&
+        undoable.has(candidate.type)
+      ) {
+        lastAction = candidate
+        break
+      }
+    }
+
+    if (!lastAction) {
+      return
+    }
+
+    onUndoRef.current?.(lastAction.id)
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Bucket
+   * -------------------------------------------------------------------------
+   */
+
+  function handleBucketFill(
+    point
+  ) {
+    const operations = getResolvedOperations()
+    const color = fillColorRef.current
+
+    // Prefer vector fills for vector objects. This is deterministic across
+    // clients and avoids a 1200x1200 flood-fill on every replay.
+    for (let i = operations.length - 1; i >= 0; i -= 1) {
+      const operation = operations[i]
+
+      if (!operation || hiddenLayers.has(operation.id)) {
+        continue
+      }
+
+      let inside = false
+
+      if (operation.type === "shape") {
+        inside = operationContainsPoint(null, operation, point)
+      } else if (
+        Array.isArray(operation.points) &&
+        operation.points.length >= 3 &&
+        (operation.closed || operation.pen)
+      ) {
+        inside = pointInPolygon(point, operation.points)
+      }
+
+      if (!inside) {
+        continue
+      }
+
+      // Remove any stale optimistic updates for this object, then append one
+      // compact authoritative update. The server persists this in Round.strokes.
+      localOperationsRef.current =
+        localOperationsRef.current.filter(
+          (local) =>
+            !(local.type === "object_update" &&
+              local.objectId === operation.id)
+        )
+
+      const update = {
+        id: createStrokeId(),
+        type: "object_update",
+        objectId: operation.id,
+        changes: { fill: color },
+      }
+
+      localOperationsRef.current.push(update)
+      localVersionRef.current += 1
+
+      onStrokeRef.current?.(update)
+      renderCanvas()
+      renderOverlay()
+      return
+    }
+
+    // Fallback for arbitrary closed raster regions.
+    const operation = {
+      id: createStrokeId(),
+      type: "fill",
+      point: clonePoint(point),
+      color,
+    }
+
+    commitOperation(operation)
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Rendering
+   * -------------------------------------------------------------------------
+   */
+
+  function renderCanvas(excludeOperationId = null) {
     const canvas =
       canvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    const context =
+      canvas.getContext("2d")
+
+    if (!context) {
+      return
+    }
+
+    const dpr =
+      window.devicePixelRatio ||
+      1
+
+    context.setTransform(
+      dpr,
+      0,
+      0,
+      dpr,
+      0,
+      0
+    )
+
+    context.clearRect(
+      0,
+      0,
+      CANVAS_WIDTH,
+      CANVAS_HEIGHT
+    )
+
+    context.globalCompositeOperation =
+      "source-over"
+
+    context.fillStyle =
+      "#ffffff"
+
+    context.fillRect(
+      0,
+      0,
+      CANVAS_WIDTH,
+      CANVAS_HEIGHT
+    )
+
+    const operations =
+      getResolvedOperations()
+
+    const edit = editRef.current
+    const previewOperation =
+      edit?.previewOperation
+
+    for (
+      const operation of
+        operations
+    ) {
+      if (
+        (
+          operation.hidden ||
+          hiddenLayers.has(operation.id)
+        ) ||
+        operation.id === excludeOperationId
+      ) {
+        continue
+      }
+
+      if (
+        edit?.type === "move" &&
+        edit.operationId === operation.id
+      ) {
+        const dx = edit.deltaX || 0
+        const dy = edit.deltaY || 0
+
+        context.save()
+        context.translate(
+          dx * CANVAS_WIDTH,
+          dy * CANVAS_HEIGHT
+        )
+        drawOperation(context, operation)
+        context.restore()
+      } else {
+        const drawable =
+          previewOperation &&
+          operation.id === edit.operationId
+            ? previewOperation
+            : operation
+
+        drawOperation(
+          context,
+          drawable
+        )
+      }
+    }
+
+    context.globalCompositeOperation =
+      "source-over"
+  }
+
+  function renderLiveCanvas() {
+    const canvas =
+      liveCanvasRef.current
 
     if (!canvas) {
       return
@@ -941,8 +4687,731 @@ export default function GameCanvas({
       0
     )
 
+    context.clearRect(
+      0,
+      0,
+      CANVAS_WIDTH,
+      CANVAS_HEIGHT
+    )
+
     context.globalCompositeOperation =
       "source-over"
+
+    const localId =
+      currentStrokeRef.current?.id ||
+      currentShapeRef.current?.id ||
+      editRef.current?.operationId
+
+    for (const operation of Object.values(liveStrokes || {})) {
+      if (!operation || operation.id === localId) {
+        continue
+      }
+
+      drawOperation(context, operation, true)
+    }
+
+    if (editRef.current) {
+      const edit = editRef.current
+      const selected =
+        getSelectedOperation()
+
+      if (selected) {
+        let preview = edit.previewOperation
+
+        if (edit.type === "move") {
+          context.save()
+          context.translate(
+            (edit.deltaX || 0) * CANVAS_WIDTH,
+            (edit.deltaY || 0) * CANVAS_HEIGHT
+          )
+          drawOperation(context, selected, true)
+          context.restore()
+        } else if (preview) {
+          drawOperation(context, preview, true)
+        }
+      }
+    }
+
+    const shape =
+      currentShapeRef.current
+
+    if (drawingRef.current && shape) {
+      const preview =
+        makeShapeOperation(
+          shape.shape,
+          shape.start,
+          shape.end,
+          strokeColorRef.current,
+          strokeWidthRef.current,
+          fillColorRef.current
+        )
+
+      preview.id = shape.id
+      drawOperation(context, preview, true)
+    }
+
+    const stroke =
+      currentStrokeRef.current
+
+    if (drawingRef.current && stroke) {
+      drawOperation(context, stroke, true)
+    }
+
+    context.globalCompositeOperation =
+      "source-over"
+  }
+
+  function colorDistance(
+    data,
+    index,
+    target
+  ) {
+    return Math.max(
+      Math.abs(data[index] - target[0]),
+      Math.abs(data[index + 1] - target[1]),
+      Math.abs(data[index + 2] - target[2]),
+      Math.abs(data[index + 3] - target[3])
+    )
+  }
+
+  function parseHexColor(
+    color
+  ) {
+    const value =
+      String(color || "")
+        .replace("#", "")
+
+    if (value.length !== 6) {
+      return [
+        24,
+        24,
+        27,
+        255,
+      ]
+    }
+
+    return [
+      parseInt(value.slice(0, 2), 16),
+      parseInt(value.slice(2, 4), 16),
+      parseInt(value.slice(4, 6), 16),
+      255,
+    ]
+  }
+
+  function applyFillOperation(
+    canvas,
+    operation
+  ) {
+    if (
+      !canvas ||
+      !operation?.point
+    ) {
+      return
+    }
+
+    const context =
+      canvas.getContext("2d")
+
+    if (!context) {
+      return
+    }
+
+    const width =
+      canvas.width
+
+    const height =
+      canvas.height
+
+    const image =
+      context.getImageData(
+        0,
+        0,
+        width,
+        height
+      )
+
+    const data =
+      image.data
+
+    const startX =
+      clamp(
+        Math.floor(
+          operation.point[0] *
+            width
+        ),
+        0,
+        width - 1
+      )
+
+    const startY =
+      clamp(
+        Math.floor(
+          operation.point[1] *
+            height
+        ),
+        0,
+        height - 1
+      )
+
+    const startIndex =
+      (
+        startY *
+          width +
+        startX
+      ) *
+      4
+
+    const target = [
+      data[startIndex],
+      data[startIndex + 1],
+      data[startIndex + 2],
+      data[startIndex + 3],
+    ]
+
+    const replacement =
+      parseHexColor(
+        operation.color
+      )
+
+    if (
+      colorDistance(
+        data,
+        startIndex,
+        replacement
+      ) === 0
+    ) {
+      return
+    }
+
+    const tolerance =
+      FILL_TOLERANCE
+
+    const queue = [
+      startX,
+      startY,
+    ]
+
+    let head = 0
+
+    while (
+      head <
+      queue.length
+    ) {
+      const x =
+        queue[head++]
+
+      const y =
+        queue[head++]
+
+      if (
+        x < 0 ||
+        x >= width ||
+        y < 0 ||
+        y >= height
+      ) {
+        continue
+      }
+
+      const index =
+        (
+          y *
+            width +
+          x
+        ) *
+        4
+
+      if (
+        colorDistance(
+          data,
+          index,
+          target
+        ) >
+        tolerance
+      ) {
+        continue
+      }
+
+      data[index] =
+        replacement[0]
+      data[index + 1] =
+        replacement[1]
+      data[index + 2] =
+        replacement[2]
+      data[index + 3] =
+        replacement[3]
+
+      queue.push(
+        x + 1,
+        y,
+        x - 1,
+        y,
+        x,
+        y + 1,
+        x,
+        y - 1
+      )
+    }
+
+    context.putImageData(
+      image,
+      0,
+      0
+    )
+  }
+
+  function drawOperation(
+    context,
+    operation,
+    preview = false
+  ) {
+    if (!operation || operation.hidden) {
+      return
+    }
+
+    if (
+      operation.type ===
+      "fill"
+    ) {
+      /*
+       * Fill operations must be replayed against the current raster.
+       */
+      applyFillOperation(
+        context.canvas,
+        operation
+      )
+
+      return
+    }
+
+    if (
+      operation.type ===
+      "shape"
+    ) {
+      drawShape(
+        context,
+        operation
+      )
+
+      return
+    }
+
+    drawStroke(
+      context,
+      operation
+    )
+  }
+
+  function drawShape(
+    context,
+    operation
+  ) {
+    const bounds =
+      operation.bounds
+
+    if (!bounds) {
+      return
+    }
+
+    const x =
+      bounds.x *
+      CANVAS_WIDTH
+
+    const y =
+      bounds.y *
+      CANVAS_HEIGHT
+
+    const width =
+      bounds.width *
+      CANVAS_WIDTH
+
+    const height =
+      bounds.height *
+      CANVAS_HEIGHT
+
+    context.save()
+
+    context.strokeStyle =
+      operation.color ||
+      DEFAULT_COLOR
+
+    context.lineWidth =
+      Number(
+        operation.width
+      ) ||
+      DEFAULT_WIDTH
+
+    context.lineCap =
+      "round"
+
+    context.lineJoin =
+      "round"
+
+    context.beginPath()
+
+    if (
+      operation.shape ===
+      "line" &&
+      operation.start &&
+      operation.end
+    ) {
+      context.moveTo(
+        operation.start[0] * CANVAS_WIDTH,
+        operation.start[1] * CANVAS_HEIGHT
+      )
+      context.lineTo(
+        operation.end[0] * CANVAS_WIDTH,
+        operation.end[1] * CANVAS_HEIGHT
+      )
+    } else if (
+      operation.shape ===
+      "circle"
+    ) {
+      context.ellipse(
+        x + width / 2,
+        y + height / 2,
+        Math.abs(width / 2),
+        Math.abs(height / 2),
+        0,
+        0,
+        Math.PI * 2
+      )
+    } else if (
+      operation.shape ===
+      "square"
+    ) {
+      context.rect(
+        x,
+        y,
+        width,
+        height
+      )
+    } else if (
+      operation.shape ===
+      "triangle"
+    ) {
+      const points =
+        shapePoints(
+          operation
+        )
+
+      if (
+        points.length >= 3
+      ) {
+        context.moveTo(
+          points[0][0] *
+            CANVAS_WIDTH,
+          points[0][1] *
+            CANVAS_HEIGHT
+        )
+
+        context.lineTo(
+          points[1][0] *
+            CANVAS_WIDTH,
+          points[1][1] *
+            CANVAS_HEIGHT
+        )
+
+        context.lineTo(
+          points[2][0] *
+            CANVAS_WIDTH,
+          points[2][1] *
+            CANVAS_HEIGHT
+        )
+
+        context.closePath()
+      }
+    }
+
+    if (operation.fill) {
+      context.fillStyle = operation.fill
+      context.fill()
+    }
+
+    context.stroke()
+
+    context.restore()
+  }
+
+  function drawPen(
+    context,
+    points,
+    color,
+    width,
+    fillColor = null,
+    closed = false
+  ) {
+    if (!Array.isArray(points) || points.length === 0) {
+      return
+    }
+
+    context.save()
+    context.globalCompositeOperation = "source-over"
+    context.strokeStyle = color || DEFAULT_COLOR
+    context.fillStyle = color || DEFAULT_COLOR
+    context.lineWidth = Number(width) || DEFAULT_WIDTH
+    context.lineCap = "round"
+    context.lineJoin = "round"
+
+    if (points.length === 1) {
+      context.beginPath()
+      context.arc(
+        points[0][0] * CANVAS_WIDTH,
+        points[0][1] * CANVAS_HEIGHT,
+        context.lineWidth / 2,
+        0,
+        Math.PI * 2
+      )
+      context.fill()
+      context.stroke()
+      context.restore()
+      return
+    }
+
+    context.beginPath()
+    context.moveTo(
+      points[0][0] * CANVAS_WIDTH,
+      points[0][1] * CANVAS_HEIGHT
+    )
+
+    if (points.length === 2) {
+      context.lineTo(
+        points[1][0] * CANVAS_WIDTH,
+        points[1][1] * CANVAS_HEIGHT
+      )
+    } else {
+      for (let i = 1; i < points.length - 1; i += 1) {
+        const current = points[i]
+        const next = points[i + 1]
+        const cx = current[0] * CANVAS_WIDTH
+        const cy = current[1] * CANVAS_HEIGHT
+        const nx = next[0] * CANVAS_WIDTH
+        const ny = next[1] * CANVAS_HEIGHT
+        context.quadraticCurveTo(
+          cx,
+          cy,
+          (cx + nx) / 2,
+          (cy + ny) / 2
+        )
+      }
+
+      const last = points[points.length - 1]
+      const previous = points[points.length - 2]
+      context.quadraticCurveTo(
+        previous[0] * CANVAS_WIDTH,
+        previous[1] * CANVAS_HEIGHT,
+        last[0] * CANVAS_WIDTH,
+        last[1] * CANVAS_HEIGHT
+      )
+    }
+
+    // Pen fill is independent from its stroke color. Only close/fill when
+    // the pen is actually closed; this keeps open freehand lines from
+    // painting a giant accidental polygon.
+    if (closed && fillColor) {
+      context.closePath()
+      context.fillStyle = fillColor
+      context.fill()
+    }
+
+    context.stroke()
+    context.restore()
+  }
+
+  function drawStroke(
+    context,
+    stroke
+  ) {
+    const points =
+      Array.isArray(
+        stroke?.points
+      )
+        ? stroke.points
+        : []
+
+    if (
+      points.length === 0
+    ) {
+      return
+    }
+
+    if (stroke.pen) {
+      drawPen(
+        context,
+        points,
+        stroke.color,
+        stroke.width,
+        stroke.fill,
+        Boolean(stroke.closed)
+      )
+      return
+    }
+
+    const isEraser =
+      stroke.type ===
+      "eraser"
+
+    const width =
+      Number(
+        stroke.width
+      ) ||
+      DEFAULT_WIDTH
+
+    context.save()
+
+    context.globalCompositeOperation =
+      isEraser
+        ? "destination-out"
+        : "source-over"
+
+    context.strokeStyle =
+      stroke.color ||
+      DEFAULT_COLOR
+
+    context.fillStyle =
+      stroke.color ||
+      DEFAULT_COLOR
+
+    context.lineWidth =
+      width
+
+    context.lineCap =
+      "round"
+
+    context.lineJoin =
+      "round"
+
+    if (
+      points.length === 1
+    ) {
+      context.beginPath()
+
+      context.arc(
+        points[0][0] *
+          CANVAS_WIDTH,
+        points[0][1] *
+          CANVAS_HEIGHT,
+        width / 2,
+        0,
+        Math.PI * 2
+      )
+
+      context.fill()
+
+      context.restore()
+
+      return
+    }
+
+    context.beginPath()
+
+    context.moveTo(
+      points[0][0] *
+        CANVAS_WIDTH,
+      points[0][1] *
+        CANVAS_HEIGHT
+    )
+
+    for (
+      let i = 1;
+      i <
+        points.length - 1;
+      i += 1
+    ) {
+      const current =
+        points[i]
+
+      const next =
+        points[i + 1]
+
+      const currentX =
+        current[0] *
+        CANVAS_WIDTH
+
+      const currentY =
+        current[1] *
+        CANVAS_HEIGHT
+
+      const nextX =
+        next[0] *
+        CANVAS_WIDTH
+
+      const nextY =
+        next[1] *
+        CANVAS_HEIGHT
+
+      context.quadraticCurveTo(
+        currentX,
+        currentY,
+        (
+          currentX +
+          nextX
+        ) / 2,
+        (
+          currentY +
+          nextY
+        ) / 2
+      )
+    }
+
+    const last =
+      points[
+        points.length - 1
+      ]
+
+    const previous =
+      points[
+        points.length - 2
+      ]
+
+    context.quadraticCurveTo(
+      previous[0] *
+        CANVAS_WIDTH,
+      previous[1] *
+        CANVAS_HEIGHT,
+      last[0] *
+        CANVAS_WIDTH,
+      last[1] *
+        CANVAS_HEIGHT
+    )
+
+    context.stroke()
+
+    context.restore()
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Overlay
+   * -------------------------------------------------------------------------
+   */
+
+  function renderOverlay() {
+    const canvas =
+      overlayCanvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    const context =
+      canvas.getContext("2d")
+
+    if (!context) {
+      return
+    }
+
+    const dpr =
+      window.devicePixelRatio ||
+      1
+
+    context.setTransform(
+      dpr,
+      0,
+      0,
+      dpr,
+      0,
+      0
+    )
 
     context.clearRect(
       0,
@@ -951,214 +5420,429 @@ export default function GameCanvas({
       CANVAS_HEIGHT
     )
 
-    // ------------------------------------------------------------------------
-    // White drawing surface
-    // ------------------------------------------------------------------------
+    const selected =
+      getSelectedOperation()
 
-    context.fillStyle =
-      "#ffffff"
+    if (!selected) {
+      return
+    }
 
-    context.fillRect(
-      0,
-      0,
-      CANVAS_WIDTH,
-      CANVAS_HEIGHT
+    const edit = editRef.current
+    const overlayOperation =
+      edit?.previewOperation || selected
+
+    const baseBounds =
+      calculateOperationBounds(
+        overlayOperation
+      )
+
+    const bounds =
+      baseBounds && edit?.type === "move"
+        ? {
+            ...baseBounds,
+            x: baseBounds.x + (edit.deltaX || 0),
+            y: baseBounds.y + (edit.deltaY || 0),
+          }
+        : baseBounds
+
+    if (bounds) {
+      context.save()
+
+      context.setLineDash([
+        8,
+        6,
+      ])
+
+      context.strokeStyle =
+        "rgba(99,102,241,0.85)"
+
+      context.lineWidth =
+        2
+
+      context.strokeRect(
+        bounds.x *
+          CANVAS_WIDTH -
+          6,
+        bounds.y *
+          CANVAS_HEIGHT -
+          6,
+        bounds.width *
+          CANVAS_WIDTH +
+          12,
+        bounds.height *
+          CANVAS_HEIGHT +
+          12
+      )
+
+      context.restore()
+    }
+
+    /*
+     * Anchor points.
+     */
+    if (
+      (
+        toolRef.current ===
+          TOOLS.ANCHOR ||
+        toolRef.current ===
+          TOOLS.CURVE
+      ) &&
+      Array.isArray(
+        overlayOperation.points
+      )
+    ) {
+      overlayOperation.points.forEach(
+        (
+          point,
+          index
+        ) => {
+          const isSelected =
+            index ===
+            selectedAnchorIndexRef.current
+
+          context.beginPath()
+
+          context.arc(
+            point[0] *
+              CANVAS_WIDTH,
+            point[1] *
+              CANVAS_HEIGHT,
+            isSelected
+              ? 10
+              : 6,
+            0,
+            Math.PI * 2
+          )
+
+          context.fillStyle =
+            isSelected
+              ? "#ffffff"
+              : "rgba(99,102,241,0.75)"
+
+          context.fill()
+
+          context.strokeStyle =
+            "#4f46e5"
+
+          context.lineWidth =
+            2
+
+          context.stroke()
+        }
+      )
+    }
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Layer helpers
+   * -------------------------------------------------------------------------
+   */
+
+  function toggleLayer(
+    operationId
+  ) {
+    const operation =
+      getResolvedOperations().find(
+        (item) => item.id === operationId
+      )
+
+    if (!operation) {
+      return
+    }
+
+    const nextHidden =
+      !Boolean(operation.hidden)
+
+    setHiddenLayers((current) => {
+      const next = new Set(current)
+      if (nextHidden) {
+        next.add(operationId)
+      } else {
+        next.delete(operationId)
+      }
+      return next
+    })
+
+    const update = {
+      id: createStrokeId(),
+      type: "object_update",
+      objectId: operationId,
+      changes: {
+        hidden: nextHidden,
+      },
+    }
+
+    localOperationsRef.current.push(update)
+    localVersionRef.current += 1
+
+    onStrokeRef.current?.(update)
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function reorderLayers(
+    operationId,
+    direction
+  ) {
+    const operations =
+      getResolvedOperations()
+
+    const ids =
+      operations.map(
+        (operation) => operation.id
+      )
+
+    const index =
+      ids.indexOf(operationId)
+
+    if (index < 0) {
+      return
+    }
+
+    let targetIndex = index
+
+    if (direction === "up") {
+      targetIndex = Math.min(
+        ids.length - 1,
+        index + 1
+      )
+    } else if (direction === "down") {
+      targetIndex = Math.max(
+        0,
+        index - 1
+      )
+    } else if (direction === "front") {
+      targetIndex = ids.length - 1
+    } else if (direction === "back") {
+      targetIndex = 0
+    }
+
+    if (targetIndex === index) {
+      return
+    }
+
+    ids.splice(index, 1)
+    ids.splice(targetIndex, 0, operationId)
+
+    const operation = {
+      id: createStrokeId(),
+      type: "layer_reorder",
+      order: ids,
+    }
+
+    localOperationsRef.current.push(operation)
+    localVersionRef.current += 1
+
+    onStrokeRef.current?.(operation)
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function deleteLayer(
+    operationId
+  ) {
+    emitObjectDelete(operationId)
+
+    if (
+      selectedOperationIdRef.current ===
+      operationId
+    ) {
+      selectedOperationIdRef.current = null
+      setSelectedOperationId(null)
+    }
+
+    renderCanvas()
+    renderOverlay()
+  }
+
+  function selectLayer(
+    operationId
+  ) {
+    setSelectedOperationId(
+      operationId
     )
 
-    context.lineCap =
-      "round"
+    selectedOperationIdRef.current =
+      operationId
 
-    context.lineJoin =
-      "round"
-
-    context.miterLimit =
-      2
-
-    context.imageSmoothingEnabled =
-      true
-
-
-    // ------------------------------------------------------------------------
-    // Server-authoritative operations
-    // ------------------------------------------------------------------------
-    //
-    // Draw the complete operation history first.
-    //
-    // Fills are intentionally included here because they need the existing
-    // rasterized drawing as their boundary.
-    //
-    // ------------------------------------------------------------------------
-
-    for (
-      const operation of
-        strokesRef.current
-    ) {
-      drawOperation(
-        context,
-        operation
-      )
-    }
-
-    // ------------------------------------------------------------------------
-    // Locally pending operations
-    // ------------------------------------------------------------------------
-
-    for (
-      const operation of
-        localOperationsRef.current
-    ) {
-      const existsOnServer =
-        strokesRef.current.some(
-          (stroke) =>
-            stroke?.id ===
-            operation?.id
-        )
-
-      if (!existsOnServer) {
-        drawOperation(
-          context,
-          operation
-        )
-      }
-    }
-
-
-    // ------------------------------------------------------------------------
-    // Active pencil / eraser stroke
-    // ------------------------------------------------------------------------
-
-    const activeStroke =
-      currentStrokeRef.current
-
-    if (
-      drawingRef.current &&
-      activeStroke
-    ) {
-      drawOperation(
-        context,
-        activeStroke
-      )
-    }
-
-    context.globalCompositeOperation =
-      "source-over"
+    renderOverlay()
   }
 
-  // --------------------------------------------------------------------------
-  // Undo
-  // --------------------------------------------------------------------------
+  /*
+   * -------------------------------------------------------------------------
+   * Tool selection
+   * -------------------------------------------------------------------------
+   */
 
-  function handleUndo() {
-    if (!canDrawRef.current) {
-      return
-    }
+  function chooseTool(
+    nextTool
+  ) {
+    setTool(
+      nextTool
+    )
 
-    const current =
-      strokesRef.current
+    toolRef.current =
+      nextTool
 
+    setShowShapeMenu(
+      false
+    )
+
+    setShowEditMenu(
+      false
+    )
+
+    /*
+     * Selection remains selected when switching between Select / Anchor /
+     * Curve.
+     */
     if (
-      !Array.isArray(current) ||
-      current.length === 0
+      nextTool !==
+        TOOLS.SELECT &&
+      nextTool !==
+        TOOLS.ANCHOR &&
+      nextTool !==
+        TOOLS.CURVE
     ) {
-      return
-    }
-
-    const lastOperation =
-      current[
-        current.length - 1
-      ]
-
-    if (!lastOperation?.id) {
-      return
-    }
-
-    if (
-      typeof onUndoRef.current ===
-      "function"
-    ) {
-      onUndoRef.current(
-        lastOperation.id
+      setSelectedAnchorIndex(
+        null
       )
-    }
-  }
 
-  // --------------------------------------------------------------------------
-  // Tool selection
-  // --------------------------------------------------------------------------
+      selectedAnchorIndexRef.current =
+        null
+    }
+
+    renderOverlay()
+  }
 
   function selectPencil() {
-    setTool(
+    chooseTool(
       TOOLS.PENCIL
     )
   }
 
+  function selectPen() {
+    chooseTool(
+      TOOLS.PEN
+    )
+  }
+
+  function selectLine() {
+    chooseTool(
+      TOOLS.LINE
+    )
+  }
+
+  function selectCircle() {
+    chooseTool(
+      TOOLS.CIRCLE
+    )
+  }
+
+  function selectSquare() {
+    chooseTool(
+      TOOLS.SQUARE
+    )
+  }
+
+  function selectTriangle() {
+    chooseTool(
+      TOOLS.TRIANGLE
+    )
+  }
+
   function selectEraser() {
-    setTool(
+    chooseTool(
       TOOLS.ERASER
     )
   }
 
   function selectBucket() {
-    setTool(
+    chooseTool(
       TOOLS.BUCKET
     )
   }
 
-  // --------------------------------------------------------------------------
-  // Color selection
-  // --------------------------------------------------------------------------
-
-  function selectColor(color) {
-    setStrokeColor(color)
-
-    // Choosing a color automatically returns to pencil mode.
-    setTool(
-      TOOLS.PENCIL
+  function selectSelect() {
+    chooseTool(
+      TOOLS.SELECT
     )
   }
 
-  // --------------------------------------------------------------------------
-  // Clear
-  // --------------------------------------------------------------------------
-
-  function handleClear() {
-    if (!canDrawRef.current) {
-      return
-    }
-
-    if (
-      typeof onClearRef.current !==
-      "function"
-    ) {
-      return
-    }
-
-    if (
-      !strokesRef.current ||
-      strokesRef.current.length ===
-        0
-    ) {
-      return
-    }
-
-    const confirmed =
-      window.confirm(
-        "Clear the entire drawing?"
-      )
-
-    if (!confirmed) {
-      return
-    }
-
-    localOperationsRef.current =
-      []
-
-    onClearRef.current()
+  function selectAnchor() {
+    chooseTool(
+      TOOLS.ANCHOR
+    )
   }
 
-  // --------------------------------------------------------------------------
-  // Cursor helpers
-  // --------------------------------------------------------------------------
+  function selectCurve() {
+    chooseTool(
+      TOOLS.CURVE
+    )
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Pointer handler patch
+   * -------------------------------------------------------------------------
+   *
+   * The original handler above handles drawing. The edit state is checked
+   * first so Select / Anchor / Curve can drag without entering drawing mode.
+   */
+
+  function handlePointerMoveWithEditing(
+    event
+  ) {
+    if (
+      editRef.current
+    ) {
+      event.preventDefault()
+
+      const canvas =
+        canvasRef.current
+
+      if (!canvas) {
+        return
+      }
+
+      handleEditMove(
+        getNormalizedPoint(
+          canvas,
+          event
+        )
+      )
+
+      return
+    }
+
+    handlePointerMove(
+      event
+    )
+  }
+
+  function handlePointerUpWithEditing(
+    event
+  ) {
+    if (
+      editRef.current
+    ) {
+      event.preventDefault()
+      finishEdit(event)
+      return
+    }
+
+    handlePointerUp(
+      event
+    )
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Brush cursor
+   * -------------------------------------------------------------------------
+   */
 
   const isDesktopPointer =
     typeof window !==
@@ -1171,305 +5855,766 @@ export default function GameCanvas({
     canDraw &&
     cursorPosition &&
     isDesktopPointer &&
-    tool !== TOOLS.BUCKET
+    tool !== TOOLS.SELECT &&
+    tool !== TOOLS.ANCHOR &&
+    tool !== TOOLS.CURVE
 
-  // --------------------------------------------------------------------------
-  // Render
-  // --------------------------------------------------------------------------
+  const showSelectCursor =
+    canDraw &&
+    cursorPosition &&
+    isDesktopPointer &&
+    tool === TOOLS.SELECT
+
+
+  const resolvedOperations =
+    getResolvedOperations()
+
+  const selectedOperation =
+    getSelectedOperation()
+
+  const shapeLabel =
+    tool === TOOLS.CIRCLE
+      ? "Circle"
+      : tool === TOOLS.SQUARE
+        ? "Square"
+        : tool === TOOLS.TRIANGLE
+          ? "Triangle"
+          : "Shape"
+
+  const editLabel =
+    tool === TOOLS.ANCHOR
+      ? "Anchor"
+      : tool === TOOLS.CURVE
+        ? "Curve"
+        : "Edit"
+
+  /*
+   * -------------------------------------------------------------------------
+   * Render
+   * -------------------------------------------------------------------------
+   */
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl">
 
-      {/* ==================================================================== */}
-      {/* Drawing toolbar                                                     */}
-      {/* ==================================================================== */}
-
       {canDraw && (
         <div className="border-b border-zinc-200 bg-zinc-100">
 
-          <div className="flex min-w-0 flex-col">
+          {/* --------------------------------------------------------------- */}
+          {/* Selected-object contextual controls                             */}
+          {/* --------------------------------------------------------------- */}
 
-            {/* ================================================================ */}
-            {/* Color row                                                        */}
-            {/* ================================================================ */}
+          {selectedOperation &&
+            tool === TOOLS.SELECT && (
+            <div className="flex items-center gap-2 overflow-x-auto border-b border-zinc-200 bg-white px-3 py-2">
 
-            <div className="flex min-w-0 items-center gap-2 px-3 py-2">
-
-              <span className="shrink-0 text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                Color
+              <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                Selected
               </span>
 
-              <div
-                className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain"
-                style={{
-                  scrollbarWidth:
-                    "none",
+              {COLORS.map(
+                (nextColor) => (
+                  <button
+                    key={
+                      nextColor
+                    }
+                    type="button"
+                    onClick={() =>
+                      changeSelectedColor(
+                        nextColor
+                      )
+                    }
+                    className={`relative h-7 w-7 shrink-0 rounded-full border-2 ${
+                      selectedOperation.color ===
+                      nextColor
+                        ? "scale-110 border-zinc-900"
+                        : "border-transparent"
+                    }`}
+                    style={{
+                      backgroundColor:
+                        nextColor,
+                    }}
+                    aria-label={`Change selected object to ${nextColor}`}
+                  >
+                    {nextColor ===
+                      "#ffffff" && (
+                      <span className="absolute inset-0 rounded-full border border-zinc-300" />
+                    )}
+                  </button>
+                )
+              )}
 
-                  WebkitOverflowScrolling:
-                    "touch",
-                }}
-              >
-                <div className="flex w-max items-center gap-2 pr-2">
+              <div className="mx-1 h-6 w-px bg-zinc-300" />
 
-                  {COLORS.map(
-                    (color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() =>
-                          selectColor(
-                            color
-                          )
-                        }
-                        aria-label={`Choose ${color}`}
-                        aria-pressed={
-                          strokeColor ===
-                            color &&
-                          tool ===
-                            TOOLS.PENCIL
-                        }
-                        className={`relative h-8 w-8 shrink-0 rounded-full border-2 transition-transform ${
-                          strokeColor ===
-                            color &&
-                          tool ===
-                            TOOLS.PENCIL
-                            ? "scale-110 border-zinc-900"
-                            : "border-transparent hover:scale-105"
-                        }`}
-                        style={{
-                          backgroundColor:
-                            color,
-                        }}
-                      >
-                        {color ===
-                          "#ffffff" && (
-                          <span className="absolute inset-0 rounded-full border border-zinc-300" />
-                        )}
-                      </button>
-                    )
-                  )}
-
-                </div>
-              </div>
-            </div>
-
-            {/* ================================================================ */}
-            {/* Tools row                                                        */}
-            {/* ================================================================ */}
-
-            <div className="flex items-center gap-2 overflow-x-auto border-t border-zinc-200 px-3 py-2">
-
-              {/* Size */}
-
-              <span className="shrink-0 text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                Size
-              </span>
-
-              <div className="flex shrink-0 items-center gap-1">
-
-                {STROKE_WIDTHS.map(
-                  (option) => (
-                    <button
-                      key={
+              {STROKE_WIDTHS.map(
+                (option) => (
+                  <button
+                    key={
+                      option.value
+                    }
+                    type="button"
+                    onClick={() =>
+                      changeSelectedWidth(
                         option.value
-                      }
-                      type="button"
-                      onClick={() =>
-                        setStrokeWidth(
-                          option.value
-                        )
-                      }
-                      aria-label={`Choose ${option.label} brush`}
-                      aria-pressed={
-                        strokeWidth ===
-                          option.value &&
-                        tool !==
-                          TOOLS.BUCKET
-                      }
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
-                        strokeWidth ===
-                            option.value &&
-                        tool !==
-                            TOOLS.BUCKET
-                          ? "bg-zinc-900 text-white"
-                          : "bg-white text-zinc-600 hover:bg-zinc-200"
-                      }`}
-                    >
-                      <span
-                        className="block rounded-full bg-current"
-                        style={{
-                          width:
-                            Math.min(
-                              option.value,
-                              20
-                            ),
+                      )
+                    }
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                      Number(
+                        selectedOperation.width
+                      ) ===
+                      option.value
+                        ? "bg-zinc-900 text-white"
+                        : "bg-zinc-100 text-zinc-600"
+                    }`}
+                    aria-label={`Set selected width to ${option.label}`}
+                  >
+                    <span
+                      className="rounded-full bg-current"
+                      style={{
+                        width:
+                          Math.min(
+                            option.value,
+                            18
+                          ),
+                        height:
+                          Math.min(
+                            option.value,
+                            18
+                          ),
+                      }}
+                    />
+                  </button>
+                )
+              )}
 
-                          height:
-                            Math.min(
-                              option.value,
-                              20
-                            ),
-                        }}
-                      />
-                    </button>
-                  )
-                )}
-
-              </div>
-
-              <div className="mx-1 h-7 w-px shrink-0 bg-zinc-300" />
-
-              {/* Pencil */}
+              <div className="mx-1 h-6 w-px bg-zinc-300" />
 
               <button
                 type="button"
                 onClick={
-                  selectPencil
+                  deleteSelected
                 }
-                aria-label="Pencil"
-                aria-pressed={
-                  tool ===
-                  TOOLS.PENCIL
-                }
-                className={`flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-semibold transition ${
-                  tool ===
-                  TOOLS.PENCIL
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-zinc-700 hover:bg-zinc-200"
-                }`}
-              >
-                <Pencil
-                  size={16}
-                />
-
-                <span>
-                  Pencil
-                </span>
-              </button>
-
-              {/* Eraser */}
-
-              <button
-                type="button"
-                onClick={
-                  selectEraser
-                }
-                aria-label="Eraser"
-                aria-pressed={
-                  tool ===
-                  TOOLS.ERASER
-                }
-                className={`flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-semibold transition ${
-                  tool ===
-                  TOOLS.ERASER
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-zinc-700 hover:bg-zinc-200"
-                }`}
-              >
-                <Eraser
-                  size={16}
-                />
-
-                <span>
-                  Eraser
-                </span>
-              </button>
-
-              {/* Bucket */}
-
-              <button
-                type="button"
-                onClick={
-                  selectBucket
-                }
-                aria-label="Fill bucket"
-                aria-pressed={
-                  tool ===
-                  TOOLS.BUCKET
-                }
-                className={`flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-semibold transition ${
-                  tool ===
-                  TOOLS.BUCKET
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-zinc-700 hover:bg-zinc-200"
-                }`}
-              >
-                <PaintBucket
-                  size={16}
-                />
-
-                <span>
-                  Fill
-                </span>
-              </button>
-
-              <div className="mx-1 h-7 w-px shrink-0 bg-zinc-300" />
-
-              {/* Undo */}
-
-              <button
-                type="button"
-                onClick={
-                  handleUndo
-                }
-                disabled={
-                  !strokes ||
-                  strokes.length ===
-                    0
-                }
-                aria-label="Undo last drawing operation"
-                className="flex h-9 shrink-0 items-center gap-2 rounded-lg bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <RotateCcw
-                  size={16}
-                />
-
-                <span>
-                  Undo
-                </span>
-              </button>
-
-              {/* Clear */}
-
-              <button
-                type="button"
-                onClick={
-                  handleClear
-                }
-                disabled={
-                  !strokes ||
-                  strokes.length ===
-                    0 ||
-                  typeof onClear !==
-                    "function"
-                }
-                aria-label="Clear drawing"
-                className="flex h-9 shrink-0 items-center gap-2 rounded-lg bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-red-50 px-3 text-xs font-semibold text-red-600"
               >
                 <Trash2
-                  size={16}
+                  size={15}
                 />
+                Delete
+              </button>
+            </div>
+          )}
 
-                <span>
-                  Clear
+          {/* --------------------------------------------------------------- */}
+          {/* Main mobile toolbar                                             */}
+          {/* --------------------------------------------------------------- */}
+
+          <div className="flex items-center gap-1 overflow-x-auto px-2 py-2">
+
+            <button
+              type="button"
+              onClick={
+                selectSelect
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.SELECT
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+              aria-label="Select"
+            >
+              <MousePointer2
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Select
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={
+                selectPencil
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.PENCIL
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+            >
+              <Pencil
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Pencil
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={
+                selectPen
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.PEN
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+            >
+              <PenLine
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Pen
+              </span>
+            </button>
+
+            {/* Shape dropdown */}
+
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowShapeMenu(
+                    (value) => !value
+                  )
+                  setShowEditMenu(false)
+                }}
+                className={`flex h-10 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                  SHAPE_TOOLS.includes(
+                    tool
+                  )
+                    ? "bg-zinc-900 text-white"
+                    : "bg-white text-zinc-700"
+                }`}
+              >
+                {tool ===
+                TOOLS.LINE ? (
+                  <Minus
+                    size={17}
+                  />
+                ) : tool ===
+                TOOLS.CIRCLE ? (
+                  <Circle
+                    size={17}
+                  />
+                ) : tool ===
+                  TOOLS.SQUARE ? (
+                  <Square
+                    size={17}
+                  />
+                ) : tool ===
+                  TOOLS.TRIANGLE ? (
+                  <Triangle
+                    size={17}
+                  />
+                ) : (
+                  <Square
+                    size={17}
+                  />
+                )}
+
+                <span className="hidden sm:inline">
+                  {shapeLabel}
                 </span>
+
+                <ChevronDown
+                  size={14}
+                />
               </button>
 
             </div>
+
+            <button
+              type="button"
+              onClick={
+                selectEraser
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.ERASER
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+            >
+              <Eraser
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Eraser
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={
+                selectBucket
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.BUCKET
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+            >
+              <PaintBucket
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Fill
+              </span>
+            </button>
+
+            {/* Edit dropdown */}
+
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditMenu(
+                    (value) => !value
+                  )
+                  setShowShapeMenu(false)
+                }}
+                className={`flex h-10 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                  EDIT_TOOLS.includes(
+                    tool
+                  )
+                    ? "bg-indigo-600 text-white"
+                    : "bg-white text-zinc-700"
+                }`}
+              >
+                <MousePointer2
+                  size={17}
+                />
+
+                <span className="hidden sm:inline">
+                  {editLabel}
+                </span>
+
+                <ChevronDown
+                  size={14}
+                />
+              </button>
+
+            </div>
+
+            <div className="mx-1 h-7 w-px shrink-0 bg-zinc-300" />
+
+            <button
+              type="button"
+              onClick={
+                handleUndo
+              }
+              className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-zinc-700"
+            >
+              <Undo2
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Undo
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setShowLayers(
+                  true
+                )
+              }
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                showLayers
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+            >
+              <Layers
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Layers
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={
+                handleClear
+              }
+              className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-zinc-700"
+            >
+              <Trash2
+                size={17}
+              />
+              <span className="hidden sm:inline">
+                Clear
+              </span>
+            </button>
+          </div>
+
+          {/* --------------------------------------------------------------- */}
+          {/* Dropdown menus — outside the horizontal scroller               */}
+          {/* --------------------------------------------------------------- */}
+
+          {(showShapeMenu || showEditMenu) && (
+            <div className="border-t border-zinc-200 bg-white px-2 py-2">
+              {showShapeMenu && (
+                <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={selectLine}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Minus size={16} />
+                    Line
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectCircle}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Circle size={16} />
+                    Circle
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectSquare}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Square size={16} />
+                    Square
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectTriangle}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Triangle size={16} />
+                    Triangle
+                  </button>
+                </div>
+              )}
+
+              {showEditMenu && (
+                <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={selectSelect}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <MousePointer2 size={16} />
+                    Select
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectAnchor}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Anchor size={16} />
+                    Anchor
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={selectCurve}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <Waves size={16} />
+                    Curve
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* --------------------------------------------------------------- */}
+          {/* Compact stroke / fill color controls */}
+
+          <div className="relative border-t border-zinc-200 bg-zinc-50">
+            <div className="flex items-center gap-2 overflow-x-auto px-3 py-2">
+              <div className="flex shrink-0 overflow-hidden rounded-lg border border-zinc-200 bg-white">
+                <button
+                  type="button"
+                  onClick={() => {
+                    selectColorTarget("stroke")
+                    setShowColorPicker(true)
+                  }}
+                  className={`flex h-8 items-center gap-1.5 px-2.5 text-[10px] font-bold uppercase ${
+                    colorTarget === "stroke"
+                      ? "bg-zinc-900 text-white"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  <span
+                    className="h-4 w-4 rounded-full border border-white/40"
+                    style={{ backgroundColor: strokeColor }}
+                  />
+                  Stroke
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    selectColorTarget("fill")
+                    setShowColorPicker(true)
+                  }}
+                  className={`flex h-8 items-center gap-1.5 border-l border-zinc-200 px-2.5 text-[10px] font-bold uppercase ${
+                    colorTarget === "fill"
+                      ? "bg-zinc-900 text-white"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  <span
+                    className="h-4 w-4 rounded border border-zinc-300"
+                    style={{ backgroundColor: fillColor }}
+                  />
+                  Fill
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setShowColorPicker((open) => !open)
+                }
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white"
+                aria-label="Open color picker"
+              >
+                <span
+                  className="h-5 w-5 rounded-full border border-zinc-300"
+                  style={{
+                    backgroundColor:
+                      colorTarget === "fill"
+                        ? fillColor
+                        : strokeColor,
+                  }}
+                />
+              </button>
+
+              {recentColors.map((nextColor) => (
+                <button
+                  key={nextColor}
+                  type="button"
+                  onClick={() => selectColor(nextColor)}
+                  className={`h-7 w-7 shrink-0 rounded-full border-2 ${
+                    (
+                      colorTarget === "fill"
+                        ? fillColor
+                        : strokeColor
+                    ).toLowerCase() ===
+                    nextColor.toLowerCase()
+                      ? "scale-110 border-zinc-900"
+                      : "border-transparent"
+                  }`}
+                  style={{ backgroundColor: nextColor }}
+                  aria-label={`Set ${colorTarget} to ${nextColor}`}
+                />
+              ))}
+
+              <input
+                type="text"
+                defaultValue={
+                  colorTarget === "fill"
+                    ? fillColor
+                    : strokeColor
+                }
+                key={`${colorTarget}-${colorTarget === "fill" ? fillColor : strokeColor}`}
+                onChange={handleHexColorChange}
+                className="h-8 w-[78px] shrink-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-[11px] uppercase text-zinc-700 outline-none focus:border-zinc-400"
+                maxLength={7}
+                aria-label={`Hex ${colorTarget} color`}
+              />
+
+              <div className="mx-1 h-6 w-px shrink-0 bg-zinc-300" />
+
+              {STROKE_WIDTHS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() =>
+                    changeSelectedWidth(option.value)
+                  }
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                    strokeWidth === option.value
+                      ? "bg-zinc-900 text-white"
+                      : "bg-white text-zinc-600"
+                  }`}
+                  aria-label={option.label}
+                >
+                  <span
+                    className="rounded-full bg-current"
+                    style={{
+                      width: Math.min(option.value, 18),
+                      height: Math.min(option.value, 18),
+                    }}
+                  />
+                </button>
+              ))}
+            </div>
+
+            {showColorPicker && (
+              <div className="absolute left-3 top-full z-[90] mt-1 w-[272px] overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
+                      {colorTarget === "fill" ? "Fill" : "Stroke"}
+                    </div>
+                    <div className="font-mono text-xs">
+                      {colorTarget === "fill" ? fillColor : strokeColor}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowColorPicker(false)}
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-white/10 hover:text-white"
+                  >
+                    Done
+                  </button>
+                </div>
+
+                <div
+                  className="relative h-[145px] cursor-crosshair overflow-hidden rounded-xl"
+                  style={{
+                    backgroundColor: `hsl(${pickerHue} 100% 50%)`,
+                    backgroundImage:
+                      "linear-gradient(to right,#fff,transparent),linear-gradient(to top,#000,transparent)",
+                  }}
+                  onPointerDown={(event) => {
+                    event.currentTarget.setPointerCapture?.(event.pointerId)
+                    pickSaturationValue(event)
+                  }}
+                  onPointerMove={(event) => {
+                    if (
+                      event.currentTarget.hasPointerCapture?.(event.pointerId)
+                    ) {
+                      pickSaturationValue(event)
+                    }
+                  }}
+                >
+                  {(() => {
+                    const hsv = hexToHsv(
+                      colorTarget === "fill"
+                        ? fillColor
+                        : strokeColor
+                    )
+                    return (
+                      <span
+                        className="pointer-events-none absolute h-4 w-4 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,.55)]"
+                        style={{
+                          left: `${hsv.s * 100}%`,
+                          top: `${(1 - hsv.v) * 100}%`,
+                          transform: "translate(-50%, -50%)",
+                        }}
+                      />
+                    )
+                  })()}
+                </div>
+
+                <div className="mt-3">
+                  <div
+                    className="relative h-5 cursor-pointer rounded-full"
+                    style={{
+                      background:
+                        "linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)",
+                    }}
+                    onPointerDown={(event) => {
+                      event.currentTarget.setPointerCapture?.(event.pointerId)
+                      pickHue(event)
+                    }}
+                    onPointerMove={(event) => {
+                      if (
+                        event.currentTarget.hasPointerCapture?.(event.pointerId)
+                      ) {
+                        pickHue(event)
+                      }
+                    }}
+                  >
+                    <span
+                      className="pointer-events-none absolute top-1/2 h-6 w-6 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,.55)]"
+                      style={{
+                        left: `${(pickerHue / 360) * 100}%`,
+                        transform: "translate(-50%, -50%)",
+                        backgroundColor: `hsl(${pickerHue} 100% 50%)`,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-6 gap-1.5">
+                  {COLORS.map((nextColor) => (
+                    <button
+                      key={nextColor}
+                      type="button"
+                      onClick={() => selectColor(nextColor)}
+                      className="h-7 rounded-md border border-white/20"
+                      style={{ backgroundColor: nextColor }}
+                      aria-label={`Set ${colorTarget} to ${nextColor}`}
+                    />
+                  ))}
+                </div>
+
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={
+                      colorTarget === "fill"
+                        ? fillColor
+                        : strokeColor
+                    }
+                    onChange={(event) => {
+                      const value = event.target.value
+                      if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+                        selectColor(value)
+                      }
+                    }}
+                    className="h-8 min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-2 font-mono text-xs uppercase text-white outline-none"
+                    maxLength={7}
+                  />
+                  <label className="relative flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-white/5">
+                    <span
+                      className="h-5 w-5 rounded-full"
+                      style={{
+                        backgroundColor:
+                          colorTarget === "fill"
+                            ? fillColor
+                            : strokeColor,
+                      }}
+                    />
+                    <input
+                      type="color"
+                      value={
+                        colorTarget === "fill"
+                          ? fillColor
+                          : strokeColor
+                      }
+                      onChange={handleCustomColorChange}
+                      className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                      aria-label={`Native ${colorTarget} picker`}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* ==================================================================== */}
-      {/* Canvas                                                               */}
-      {/* ==================================================================== */}
+      {/* ================================================================== */}
+      {/* Canvas                                                             */}
+      {/* ================================================================== */}
 
       <div className="relative">
 
         <canvas
           ref={canvasRef}
-          width={CANVAS_WIDTH}
-          height={CANVAS_HEIGHT}
+          width={
+            CANVAS_WIDTH
+          }
+          height={
+            CANVAS_HEIGHT
+          }
           className={`block h-auto w-full ${
             canDraw
               ? "cursor-none touch-none"
@@ -1477,8 +6622,7 @@ export default function GameCanvas({
           }`}
           style={{
             aspectRatio:
-              `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}`,
-
+              `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`,
             touchAction:
               canDraw
                 ? "none"
@@ -1486,9 +6630,32 @@ export default function GameCanvas({
           }}
         />
 
-        {/* ================================================================ */}
-        {/* Desktop brush cursor                                             */}
-        {/* ================================================================ */}
+        <canvas
+          ref={liveCanvasRef}
+          width={CANVAS_WIDTH}
+          height={CANVAS_HEIGHT}
+          className="pointer-events-none absolute inset-0 z-10 block h-full w-full"
+          style={{
+            aspectRatio: `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`,
+          }}
+        />
+
+        <canvas
+          ref={
+            overlayCanvasRef
+          }
+          width={
+            CANVAS_WIDTH
+          }
+          height={
+            CANVAS_HEIGHT
+          }
+          className="pointer-events-none absolute inset-0 z-20 block h-full w-full"
+          style={{
+            aspectRatio:
+              `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`,
+          }}
+        />
 
         {showBrushCursor && (
           <div
@@ -1496,24 +6663,25 @@ export default function GameCanvas({
             style={{
               left:
                 cursorPosition.x,
-
               top:
                 cursorPosition.y,
 
               width:
                 tool ===
-                  TOOLS.ERASER
+                TOOLS.ERASER
                   ? Math.max(
-                      strokeWidth * 2,
+                      strokeWidth *
+                        2,
                       12
                     )
                   : strokeWidth,
 
               height:
                 tool ===
-                  TOOLS.ERASER
+                TOOLS.ERASER
                   ? Math.max(
-                      strokeWidth * 2,
+                      strokeWidth *
+                        2,
                       12
                     )
                   : strokeWidth,
@@ -1523,16 +6691,29 @@ export default function GameCanvas({
 
               backgroundColor:
                 tool ===
-                  TOOLS.ERASER
+                TOOLS.ERASER
                   ? "rgba(255,255,255,0.45)"
                   : `${strokeColor}22`,
             }}
           />
         )}
 
-        {/* ================================================================ */}
-        {/* Bucket cursor                                                    */}
-        {/* ================================================================ */}
+        {showSelectCursor && (
+          <div
+            className="pointer-events-none absolute z-30 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-900 bg-white/85 shadow-sm"
+            style={{
+              left: cursorPosition.x,
+              top: cursorPosition.y,
+              transform: "translate(-50%, -50%)",
+            }}
+          >
+            <MousePointer2
+              size={15}
+              strokeWidth={2.25}
+              className="text-zinc-900"
+            />
+          </div>
+        )}
 
         {canDraw &&
           cursorPosition &&
@@ -1544,10 +6725,8 @@ export default function GameCanvas({
               style={{
                 left:
                   cursorPosition.x,
-
                 top:
                   cursorPosition.y,
-
                 transform:
                   "translate(-50%, -50%)",
               }}
@@ -1558,969 +6737,221 @@ export default function GameCanvas({
               />
             </div>
           )}
-
       </div>
+
+      {/* ================================================================== */}
+      {/* Layers bottom sheet                                                */}
+      {/* ================================================================== */}
+
+      {showLayers && (
+        <div className="absolute inset-0 z-[100] flex items-end bg-black/30">
+
+          <div className="max-h-[70%] w-full rounded-t-2xl bg-white shadow-2xl">
+
+            <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
+              <div>
+                <div className="text-sm font-bold text-zinc-900">
+                  Layers
+                </div>
+
+                <div className="text-[11px] text-zinc-500">
+                  Top layers appear above lower layers.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setShowLayers(
+                    false
+                  )
+                }
+                className="rounded-lg bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-700"
+              >
+                Done
+              </button>
+            </div>
+
+            <div className="max-h-[50vh] overflow-y-auto p-2">
+              {resolvedOperations
+                .slice()
+                .reverse()
+                .map((operation) => {
+                  const selected =
+                    operation.id ===
+                    selectedOperationId
+
+                  const hidden =
+                    Boolean(operation.hidden) ||
+                    hiddenLayers.has(
+                      operation.id
+                    )
+
+                  const label =
+                    operation.type ===
+                    "shape"
+                      ? operation.shape
+                      : operation.pen
+                        ? "Pen"
+                        : operation.type ===
+                            "fill"
+                          ? "Fill"
+                          : operation.type ===
+                              "eraser"
+                            ? "Eraser"
+                            : "Drawing"
+
+                  return (
+                    <div
+                      key={operation.id}
+                      className={`mb-1 flex items-center gap-1 rounded-xl p-1 ${
+                        selected
+                          ? "bg-indigo-50 ring-1 ring-indigo-200"
+                          : "bg-white"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          selectLayer(
+                            operation.id
+                          )
+                        }
+                        className="min-w-0 flex-1 rounded-lg px-2 py-2 text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="h-5 w-5 shrink-0 rounded border border-zinc-300"
+                            style={{
+                              backgroundColor:
+                                operation.color ||
+                                operation.fill ||
+                                "#ffffff",
+                            }}
+                          />
+
+                          <span className="truncate text-sm font-medium capitalize text-zinc-800">
+                            {label}
+                          </span>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          toggleLayer(
+                            operation.id
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600"
+                        aria-label={
+                          hidden
+                            ? "Show layer"
+                            : "Hide layer"
+                        }
+                      >
+                        {hidden ? (
+                          <EyeOff
+                            size={16}
+                          />
+                        ) : (
+                          <Eye
+                            size={16}
+                          />
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          reorderLayers(
+                            operation.id,
+                            "back"
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600"
+                        aria-label="Send to back"
+                      >
+                        <ChevronsDown
+                          size={16}
+                        />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          reorderLayers(
+                            operation.id,
+                            "down"
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600"
+                        aria-label="Move layer down"
+                      >
+                        <ArrowDown
+                          size={16}
+                        />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          reorderLayers(
+                            operation.id,
+                            "up"
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600"
+                        aria-label="Move layer up"
+                      >
+                        <ArrowUp
+                          size={16}
+                        />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          reorderLayers(
+                            operation.id,
+                            "front"
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600"
+                        aria-label="Bring to front"
+                      >
+                        <ChevronsUp
+                          size={16}
+                        />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          deleteLayer(
+                            operation.id
+                          )
+                        }
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-red-600"
+                        aria-label="Delete layer"
+                      >
+                        <Trash2
+                          size={16}
+                        />
+                      </button>
+                    </div>
+                  )
+                })}
+
+              {resolvedOperations.length === 0 && (
+                <div className="px-4 py-8 text-center text-sm text-zinc-500">
+                  No layers yet.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
-}
-
-// ==============================================================================
-// Drawing operation renderer
-// ==============================================================================
-
-function drawOperation(
-  context,
-  operation
-) {
-  if (!operation) {
-    return
-  }
-
-  const type =
-    operation.type ||
-    "stroke"
-
-  // --------------------------------------------------------------------------
-  // Fill
-  // --------------------------------------------------------------------------
-
-  if (type === "fill") {
-    applyFillOperation(
-      context.canvas,
-      operation
-    )
-
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Stroke / Eraser
-  // --------------------------------------------------------------------------
-
-  drawStroke(
-    context,
-    operation
-  )
-}
-
-// ==============================================================================
-// Stroke renderer
-// ==============================================================================
-
-function drawStroke(
-  context,
-  stroke
-) {
-  const points =
-    Array.isArray(stroke?.points)
-      ? stroke.points
-      : []
-
-  if (points.length === 0) {
-    return
-  }
-
-  const isEraser =
-    stroke?.type ===
-    "eraser"
-
-  const color =
-    stroke.color ||
-    DEFAULT_COLOR
-
-  const width =
-    Number(stroke.width) ||
-    DEFAULT_WIDTH
-
-  context.save()
-
-  if (isEraser) {
-    // ------------------------------------------------------------------------
-    // REAL ERASER
-    //
-    // This removes pixels rather than drawing white pixels.
-    // ------------------------------------------------------------------------
-
-    context.globalCompositeOperation =
-      "destination-out"
-  } else {
-    context.globalCompositeOperation =
-      "source-over"
-  }
-
-  context.strokeStyle =
-    color
-
-  context.fillStyle =
-    color
-
-  context.lineWidth =
-    width
-
-  context.lineCap =
-    "round"
-
-  context.lineJoin =
-    "round"
-
-  // --------------------------------------------------------------------------
-  // Single point
-  // --------------------------------------------------------------------------
-
-  if (points.length === 1) {
-    const [x, y] =
-      points[0]
-
-    context.beginPath()
-
-    context.arc(
-      x * CANVAS_WIDTH,
-      y * CANVAS_HEIGHT,
-      width / 2,
-      0,
-      Math.PI * 2
-    )
-
-    context.fill()
-
-    context.restore()
-
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Two points
-  // --------------------------------------------------------------------------
-
-  if (points.length === 2) {
-    const [x1, y1] =
-      points[0]
-
-    const [x2, y2] =
-      points[1]
-
-    context.beginPath()
-
-    context.moveTo(
-      x1 * CANVAS_WIDTH,
-      y1 * CANVAS_HEIGHT
-    )
-
-    context.lineTo(
-      x2 * CANVAS_WIDTH,
-      y2 * CANVAS_HEIGHT
-    )
-
-    context.stroke()
-
-    context.restore()
-
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Three or more points
-  // --------------------------------------------------------------------------
-
-  context.beginPath()
-
-  const first =
-    points[0]
-
-  context.moveTo(
-    first[0] * CANVAS_WIDTH,
-    first[1] * CANVAS_HEIGHT
-  )
-
-  for (
-    let index = 1;
-    index <
-      points.length - 1;
-    index++
-  ) {
-    const current =
-      points[index]
-
-    const next =
-      points[index + 1]
-
-    const currentX =
-      current[0] *
-      CANVAS_WIDTH
-
-    const currentY =
-      current[1] *
-      CANVAS_HEIGHT
-
-    const nextX =
-      next[0] *
-      CANVAS_WIDTH
-
-    const nextY =
-      next[1] *
-      CANVAS_HEIGHT
-
-    const midpointX =
-      (currentX + nextX) / 2
-
-    const midpointY =
-      (currentY + nextY) / 2
-
-    context.quadraticCurveTo(
-      currentX,
-      currentY,
-      midpointX,
-      midpointY
-    )
-  }
-
-  const penultimate =
-    points[
-      points.length - 2
-    ]
-
-  const last =
-    points[
-      points.length - 1
-    ]
-
-  context.quadraticCurveTo(
-    penultimate[0] *
-      CANVAS_WIDTH,
-
-    penultimate[1] *
-      CANVAS_HEIGHT,
-
-    last[0] *
-      CANVAS_WIDTH,
-
-    last[1] *
-      CANVAS_HEIGHT
-  )
-
-  context.stroke()
-
-  context.restore()
-}
-
-// ==============================================================================
-// Flood fill
-// ==============================================================================
-//
-// The canvas is rendered at device-pixel resolution, so flood fill must work
-// against the actual backing-store dimensions rather than the logical
-// 1200 × 1200 drawing coordinates.
-//
-// The fill uses two tolerances:
-//
-//   FILL_TOLERANCE
-//     Pixels that clearly belong to the region are included.
-//
-//   FILL_EDGE_TOLERANCE
-//     Anti-aliased pixels immediately adjacent to the region are allowed
-//     to be painted so we don't leave a thin white halo around outlines.
-//
-// We deliberately keep the edge tolerance well below the difference between
-// a white interior pixel and a dark outline pixel, preventing normal outlines
-// from being crossed.
-// ==============================================================================
-
-
-function applyFillOperation(
-  canvas,
-  operation
-) {
-  if (
-    !canvas ||
-    operation?.type !== "fill"
-  ) {
-    return
-  }
-
-  const point =
-    Array.isArray(operation.point)
-      ? operation.point
-      : null
-
-  if (
-    !point ||
-    point.length !== 2
-  ) {
-    return
-  }
-
-  const context =
-    canvas.getContext("2d")
-
-  if (!context) {
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Actual backing-store dimensions
-  // --------------------------------------------------------------------------
-
-  const width =
-    canvas.width
-
-  const height =
-    canvas.height
-
-  if (
-    width <= 0 ||
-    height <= 0
-  ) {
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Normalized point -> backing-store pixel
-  // --------------------------------------------------------------------------
-
-  const x = clamp(
-    Math.floor(
-      point[0] * width
-    ),
-    0,
-    width - 1
-  )
-
-  const y = clamp(
-    Math.floor(
-      point[1] * height
-    ),
-    0,
-    height - 1
-  )
-
-  // --------------------------------------------------------------------------
-  // Read the actual raster
-  // --------------------------------------------------------------------------
-
-  const image =
-    context.getImageData(
-      0,
-      0,
-      width,
-      height
-    )
-
-  const data =
-    image.data
-
-  const startIndex =
-    (y * width + x) * 4
-
-  const targetR =
-    data[startIndex]
-
-  const targetG =
-    data[startIndex + 1]
-
-  const targetB =
-    data[startIndex + 2]
-
-  const targetA =
-    data[startIndex + 3]
-
-  const fillRgb =
-    hexToRgb(
-      operation.color ||
-        DEFAULT_COLOR
-    )
-
-  if (!fillRgb) {
-    return
-  }
-
-  // --------------------------------------------------------------------------
-  // Nothing to do if we're already on the fill color.
-  // --------------------------------------------------------------------------
-
-  if (
-    colorWithinTolerance(
-      targetR,
-      targetG,
-      targetB,
-      targetA,
-      fillRgb.r,
-      fillRgb.g,
-      fillRgb.b,
-      255,
-      FILL_TOLERANCE
-    )
-  ) {
-    return
-  }
-
-  const pixelCount =
-    width * height
-
-  const visited =
-    new Uint8Array(
-      pixelCount
-    )
-
-  const queue =
-    new Int32Array(
-      pixelCount
-    )
-
-  let head = 0
-  let tail = 0
-
-  const startPixel =
-    y * width + x
-
-  queue[tail++] =
-    startPixel
-
-  visited[startPixel] =
-    1
-
-  // --------------------------------------------------------------------------
-  // First pass: find the actual region.
-  // --------------------------------------------------------------------------
-
-  while (
-    head < tail
-  ) {
-    const pixel =
-      queue[head++]
-
-    const px =
-      pixel % width
-
-    const py =
-      Math.floor(
-        pixel / width
-      )
-
-    const index =
-      pixel * 4
-
-    const r =
-      data[index]
-
-    const g =
-      data[index + 1]
-
-    const b =
-      data[index + 2]
-
-    const a =
-      data[index + 3]
-
-    if (
-      !colorWithinTolerance(
-        r,
-        g,
-        b,
-        a,
-        targetR,
-        targetG,
-        targetB,
-        targetA,
-        FILL_TOLERANCE
-      )
-    ) {
-      continue
-    }
-
-    // Paint the actual region immediately.
-    data[index] =
-      fillRgb.r
-
-    data[index + 1] =
-      fillRgb.g
-
-    data[index + 2] =
-      fillRgb.b
-
-    data[index + 3] =
-      255
-
-    // ------------------------------------------------------------------------
-    // Neighbors
-    // ------------------------------------------------------------------------
-
-    if (px > 0) {
-      tail =
-        addFillNeighbor(
-          pixel - 1,
-          targetR,
-          targetG,
-          targetB,
-          targetA,
-          data,
-          visited,
-          queue,
-          tail,
-          width
-        )
-    }
-
-    if (px < width - 1) {
-      tail =
-        addFillNeighbor(
-          pixel + 1,
-          targetR,
-          targetG,
-          targetB,
-          targetA,
-          data,
-          visited,
-          queue,
-          tail,
-          width
-        )
-    }
-
-    if (py > 0) {
-      tail =
-        addFillNeighbor(
-          pixel - width,
-          targetR,
-          targetG,
-          targetB,
-          targetA,
-          data,
-          visited,
-          queue,
-          tail,
-          width
-        )
-    }
-
-    if (py < height - 1) {
-      tail =
-        addFillNeighbor(
-          pixel + width,
-          targetR,
-          targetG,
-          targetB,
-          targetA,
-          data,
-          visited,
-          queue,
-          tail,
-          width
-        )
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // Second pass: cover the anti-aliased fringe.
-  //
-  // We inspect pixels immediately surrounding the filled region. A fringe
-  // pixel is only accepted when it is reasonably close to the original
-  // target color AND is adjacent to a pixel that we actually filled.
-  //
-  // This is what removes the thin white halo without allowing the bucket to
-  // walk through the dark outline.
-  // --------------------------------------------------------------------------
-
-  const fringe =
-    []
-
-  for (
-    let pixel = 0;
-    pixel < pixelCount;
-    pixel++
-  ) {
-    if (!visited[pixel]) {
-      continue
-    }
-
-    const px =
-      pixel % width
-
-    const py =
-      Math.floor(
-        pixel / width
-      )
-
-    if (px > 0) {
-      collectFillFringe(
-        pixel - 1,
-        targetR,
-        targetG,
-        targetB,
-        targetA,
-        data,
-        visited,
-        fringe,
-        fillRgb
-      )
-    }
-
-    if (px < width - 1) {
-      collectFillFringe(
-        pixel + 1,
-        targetR,
-        targetG,
-        targetB,
-        targetA,
-        data,
-        visited,
-        fringe,
-        fillRgb
-      )
-    }
-
-    if (py > 0) {
-      collectFillFringe(
-        pixel - width,
-        targetR,
-        targetG,
-        targetB,
-        targetA,
-        data,
-        visited,
-        fringe,
-        fillRgb
-      )
-    }
-
-    if (py < height - 1) {
-      collectFillFringe(
-        pixel + width,
-        targetR,
-        targetG,
-        targetB,
-        targetA,
-        data,
-        visited,
-        fringe,
-        fillRgb
-      )
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // Paint the fringe.
-  // --------------------------------------------------------------------------
-
-  for (
-    const pixel of fringe
-  ) {
-    const index =
-      pixel * 4
-
-    data[index] =
-      fillRgb.r
-
-    data[index + 1] =
-      fillRgb.g
-
-    data[index + 2] =
-      fillRgb.b
-
-    data[index + 3] =
-      255
-  }
-
-  context.putImageData(
-    image,
-    0,
-    0
-  )
-}
-
-// ==============================================================================
-// Flood-fill neighbor
-// ==============================================================================
-
-function addFillNeighbor(
-  pixel,
-  targetR,
-  targetG,
-  targetB,
-  targetA,
-  data,
-  visited,
-  queue,
-  queueIndex,
-  width
-) {
-  if (
-    visited[pixel]
-  ) {
-    return queueIndex
-  }
-
-  const index =
-    pixel * 4
-
-  const r =
-    data[index]
-
-  const g =
-    data[index + 1]
-
-  const b =
-    data[index + 2]
-
-  const a =
-    data[index + 3]
-
-  if (
-    !colorWithinTolerance(
-      r,
-      g,
-      b,
-      a,
-      targetR,
-      targetG,
-      targetB,
-      targetA,
-      FILL_TOLERANCE
-    )
-  ) {
-    return queueIndex
-  }
-
-  visited[pixel] =
-    1
-
-  queue[queueIndex] =
-    pixel
-
-  return queueIndex + 1
-}
-
-// ==============================================================================
-// Anti-aliased fill fringe
-// ==============================================================================
-
-
-function collectFillFringe(
-  pixel,
-  targetR,
-  targetG,
-  targetB,
-  targetA,
-  data,
-  visited,
-  fringe,
-  fillRgb
-) {
-  if (
-    visited[pixel]
-  ) {
-    return
-  }
-
-  const index =
-    pixel * 4
-
-  const r =
-    data[index]
-
-  const g =
-    data[index + 1]
-
-  const b =
-    data[index + 2]
-
-  const a =
-    data[index + 3]
-
-  // The main flood fill already handles pixels that closely match the
-  // original region. Here we only capture the slightly different,
-  // anti-aliased pixels immediately surrounding that region.
-  if (
-    !colorWithinTolerance(
-      r,
-      g,
-      b,
-      a,
-      targetR,
-      targetG,
-      targetB,
-      targetA,
-      FILL_EDGE_TOLERANCE
-    )
-  ) {
-    return
-  }
-
-  if (
-    colorWithinTolerance(
-      r,
-      g,
-      b,
-      a,
-      targetR,
-      targetG,
-      targetB,
-      targetA,
-      FILL_TOLERANCE
-    )
-  ) {
-    return
-  }
-
-  visited[pixel] =
-    1
-
-  fringe.push(
-    pixel
-  )
-}
-
-// ==============================================================================
-// Color comparison
-// ==============================================================================
-
-function colorWithinTolerance(
-  r1,
-  g1,
-  b1,
-  a1,
-  r2,
-  g2,
-  b2,
-  a2,
-  tolerance
-) {
-  return (
-    Math.abs(r1 - r2) <=
-      tolerance &&
-    Math.abs(g1 - g2) <=
-      tolerance &&
-    Math.abs(b1 - b2) <=
-      tolerance &&
-    Math.abs(a1 - a2) <=
-      tolerance
-  )
-}
-
-// ==============================================================================
-// Hex → RGB
-// ==============================================================================
-
-function hexToRgb(hex) {
-  if (
-    typeof hex !==
-      "string"
-  ) {
-    return null
-  }
-
-  const match =
-    hex.match(
-      /^#([0-9a-f]{6})$/i
-    )
-
-  if (!match) {
-    return null
-  }
-
-  const value =
-    match[1]
-
-  return {
-    r: parseInt(
-      value.slice(0, 2),
-      16
-    ),
-
-    g: parseInt(
-      value.slice(2, 4),
-      16
-    ),
-
-    b: parseInt(
-      value.slice(4, 6),
-      16
-    ),
-  }
-}
-
-// ==============================================================================
-// Coordinate conversion
-// ==============================================================================
-
-function getNormalizedPoint(
-  canvas,
-  event
-) {
-  const rect =
-    canvas.getBoundingClientRect()
-
-  if (
-    rect.width <= 0 ||
-    rect.height <= 0
-  ) {
-    return [0, 0]
-  }
-
-  const x =
-    (event.clientX -
-      rect.left) /
-    rect.width
-
-  const y =
-    (event.clientY -
-      rect.top) /
-    rect.height
-
-  return [
-    clamp(x, 0, 1),
-    clamp(y, 0, 1),
-  ]
-}
-
-// ==============================================================================
-// Distance
-// ==============================================================================
-
-function normalizedDistance(
-  a,
-  b
-) {
-  const dx =
-    a[0] - b[0]
-
-  const dy =
-    a[1] - b[1]
-
-  return Math.sqrt(
-    dx * dx +
-      dy * dy
-  )
-}
-
-// ==============================================================================
-// Utilities
-// ==============================================================================
-
-function clamp(
-  value,
-  min,
-  max
-) {
-  return Math.min(
-    max,
-    Math.max(
-      min,
-      value
-    )
-  )
-}
-
-function createStrokeId() {
-  if (
-    typeof crypto !==
-      "undefined" &&
-    typeof crypto.randomUUID ===
-      "function"
-  ) {
-    return crypto.randomUUID()
-  }
-
-  return `${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2)}`
 }
