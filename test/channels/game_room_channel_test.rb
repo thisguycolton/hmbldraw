@@ -91,6 +91,43 @@ class GameRoomChannelTest < ActionCable::Channel::TestCase
       transmissions.last.fetch("message")
   end
 
+  test "a cancelled touch gesture clears its live preview" do
+    round = create_round(started_at: Time.current)
+    subscribe(code: @game_room.code, player_token: @token)
+
+    assert_broadcast_on(
+      "game_room:#{@game_room.id}",
+      {
+        type: "stroke_points",
+        round: { id: round.id, number: round.number },
+        stroke: { id: "touch-preview", cancelled: true, points: [] }
+      }
+    ) do
+      perform :draw_live, {
+        round_id: round.id,
+        type: "cancel",
+        stroke: { "id" => "touch-preview" }
+      }
+    end
+  end
+
+  test "drawing reconnect includes existing guesses in chronological order" do
+    round = create_round(started_at: Time.current)
+    guesser = @game_room.players.create!(
+      name: "Guesser",
+      position: 1,
+      score: 0,
+      connected: true
+    )
+    round.guesses.create!(player: guesser, text: "first", correct: false)
+    round.guesses.create!(player: guesser, text: "second", correct: false)
+
+    subscribe(code: @game_room.code, player_token: @token)
+
+    payload = transmissions.find { |item| item["type"] == "round_started" }
+    assert_equal ["first", "second"], payload.dig("round", "guesses").pluck("text")
+  end
+
   private
 
   def create_round(started_at:)

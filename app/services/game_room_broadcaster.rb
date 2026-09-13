@@ -134,7 +134,15 @@ def self.round_started(game_room, round)
         },
         started_at: round.started_at.iso8601,
         duration: game_room.round_duration,
-        strokes: Array(round.strokes)
+        strokes: Array(round.strokes),
+        guesses: round.guesses.includes(:player).order(:created_at).map do |guess|
+          {
+            id: guess.id,
+            player: { id: guess.player.id, name: guess.player.name },
+            text: guess.text,
+            correct: guess.correct
+          }
+        end
       }
     }
   )

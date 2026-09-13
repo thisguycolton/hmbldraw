@@ -232,6 +232,13 @@ def draw_live(data)
       round,
       payload[:stroke]
     )
+
+  when "cancel"
+    GameRoomBroadcaster.stroke_points(
+      @game_room,
+      round,
+      payload[:stroke]
+    )
   end
 
 rescue GameRoomGame::Error => e
@@ -930,7 +937,15 @@ def sync_current_game_state
           },
           started_at: round.started_at.iso8601,
           duration: @game_room.round_duration,
-          strokes: Array(round.strokes)
+          strokes: Array(round.strokes),
+          guesses: round.guesses.includes(:player).order(:created_at).map do |guess|
+            {
+              id: guess.id,
+              player: { id: guess.player.id, name: guess.player.name },
+              text: guess.text,
+              correct: guess.correct
+            }
+          end
         }
       }
     )
@@ -1061,7 +1076,7 @@ end
   data = data.to_h.stringify_keys
   type = data["type"].to_s
 
-  unless %w[start points].include?(type)
+  unless %w[start points cancel].include?(type)
     raise GameRoomGame::Error,
           "Invalid live drawing event."
   end
@@ -1072,6 +1087,8 @@ end
     raise GameRoomGame::Error,
           "Invalid live stroke."
   end
+
+  raw_stroke = raw_stroke.stringify_keys
 
   operation_type = raw_stroke["type"].to_s
   operation_type = "stroke" if operation_type.blank?
@@ -1087,6 +1104,17 @@ end
   id = raw_stroke["id"].to_s.first(100)
 
   raise GameRoomGame::Error, "Invalid stroke ID." if id.blank?
+
+  if type == "cancel"
+    return {
+      type: type,
+      stroke: {
+        id: id,
+        cancelled: true,
+        points: []
+      }
+    }
+  end
 
   if operation_type == "shape"
     shape = raw_stroke["shape"].to_s

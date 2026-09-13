@@ -38,6 +38,7 @@ import {
 const CANVAS_SIZE = 1200
 const CANVAS_WIDTH = CANVAS_SIZE
 const CANVAS_HEIGHT = CANVAS_SIZE
+const MAX_CANVAS_PIXEL_RATIO = 1.5
 
 const LIVE_UPDATE_INTERVAL = 30
 const MIN_POINT_DISTANCE = 0.0015
@@ -45,6 +46,16 @@ const MIN_POINT_DISTANCE = 0.0015
 const FILL_TOLERANCE = 18
 const PEN_SIMPLIFY_TOLERANCE = 0.0018
 const PEN_MAX_POINTS = 450
+
+function canvasPixelRatio() {
+  if (typeof window === "undefined") return 1
+
+  // The editor already renders into a 1200x1200 logical surface. Letting a
+  // 3x mobile display turn each of the three canvases into 3600x3600 buffers
+  // consumes well over 150 MB and makes Mobile Safari reload the page. A
+  // modest cap stays crisp while keeping the editor comfortably responsive.
+  return Math.min(window.devicePixelRatio || 1, MAX_CANVAS_PIXEL_RATIO)
+}
 
 function shouldSnapPenClosed(points) {
   // Pen strokes are shape-like freeform paths. Once the user has supplied
@@ -1292,6 +1303,7 @@ export default function GameCanvas({
   onLiveStroke,
   onUndo,
   onClear,
+  mobileViewport = false,
 }) {
   const [strokeColor, setStrokeColor] =
     useState(DEFAULT_COLOR)
@@ -1342,6 +1354,41 @@ export default function GameCanvas({
     useRef(null)
 
   const liveCanvasRef =
+    useRef(null)
+
+  const canvasViewportRef =
+    useRef(null)
+
+  const canvasStageRef =
+    useRef(null)
+
+  const stageSizeRef =
+    useRef(0)
+
+  const viewportPointersRef =
+    useRef(new Map())
+
+  const viewportGestureRef =
+    useRef(null)
+
+  const suppressTouchRef =
+    useRef(false)
+
+  const viewportTransformRef =
+    useRef({
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation: 0,
+    })
+
+  const editRenderFrameRef =
+    useRef(null)
+
+  const cursorFrameRef =
+    useRef(null)
+
+  const pendingCursorRef =
     useRef(null)
 
   const drawingRef =
@@ -1441,6 +1488,10 @@ export default function GameCanvas({
     eraseEditRef.current = null
     selectedOperationIdRef.current = null
     selectedAnchorIndexRef.current = null
+    viewportPointersRef.current.clear()
+    viewportGestureRef.current = null
+    suppressTouchRef.current = false
+    resetViewportTransform()
     setSelectedOperationId(null)
     setSelectedAnchorIndex(null)
   }, [roundId])
@@ -1567,6 +1618,50 @@ export default function GameCanvas({
         "resize",
         handleResize
       )
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mobileViewport) return
+
+    const viewport = canvasViewportRef.current
+    const stage = canvasStageRef.current
+
+    if (!viewport || !stage) return
+
+    const resizeStage = () => {
+      const size = Math.max(
+        160,
+        Math.min(
+          viewport.clientWidth - 24,
+          viewport.clientHeight - 24
+        )
+      )
+
+      stageSizeRef.current = size
+      stage.style.width = `${size}px`
+      stage.style.height = `${size}px`
+      stage.style.marginLeft = `${-size / 2}px`
+      stage.style.marginTop = `${-size / 2}px`
+      applyViewportTransform()
+    }
+
+    const observer = new ResizeObserver(resizeStage)
+    observer.observe(viewport)
+    resizeStage()
+
+    return () => observer.disconnect()
+  }, [mobileViewport])
+
+  useEffect(() => {
+    return () => {
+      if (editRenderFrameRef.current != null) {
+        cancelAnimationFrame(editRenderFrameRef.current)
+      }
+
+      if (cursorFrameRef.current != null) {
+        cancelAnimationFrame(cursorFrameRef.current)
+      }
     }
   }, [])
 
@@ -1782,6 +1877,177 @@ export default function GameCanvas({
 
   /*
    * -------------------------------------------------------------------------
+   * Mobile canvas viewport
+   * -------------------------------------------------------------------------
+   */
+
+  function applyViewportTransform() {
+    const stage = canvasStageRef.current
+    if (!stage) return
+
+    const transform = viewportTransformRef.current
+    stage.style.transform =
+      `translate3d(${transform.x}px, ${transform.y}px, 0) ` +
+      `rotate(${transform.rotation}deg) scale(${transform.scale})`
+  }
+
+  function resetViewportTransform() {
+    viewportTransformRef.current = {
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation: 0,
+    }
+    applyViewportTransform()
+  }
+
+  function cancelInteractionForViewportGesture() {
+    const liveId =
+      currentStrokeRef.current?.id ||
+      currentShapeRef.current?.id
+
+    if (liveId) {
+      onLiveStrokeRef.current?.({
+        type: "cancel",
+        stroke: { id: liveId },
+      })
+    }
+
+    drawingRef.current = false
+    currentStrokeRef.current = null
+    currentShapeRef.current = null
+    pendingPointsRef.current = []
+    eraseEditRef.current = null
+    editRef.current = null
+    selectedAnchorIndexRef.current = null
+    setSelectedAnchorIndex(null)
+    renderCanvas()
+    renderLiveCanvas()
+    renderOverlay()
+  }
+
+  function handleViewportPointerDownCapture(event) {
+    if (!mobileViewport || event.pointerType !== "touch") return
+
+    viewportPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    })
+
+    if (viewportPointersRef.current.size < 2) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchRef.current = true
+    cancelInteractionForViewportGesture()
+
+    const points = [...viewportPointersRef.current.values()].slice(0, 2)
+    const [first, second] = points
+    const transform = viewportTransformRef.current
+
+    viewportGestureRef.current = {
+      midpoint: {
+        x: (first.x + second.x) / 2,
+        y: (first.y + second.y) / 2,
+      },
+      distance: Math.max(
+        1,
+        Math.hypot(second.x - first.x, second.y - first.y)
+      ),
+      angle: Math.atan2(second.y - first.y, second.x - first.x),
+      transform: { ...transform },
+    }
+  }
+
+  function handleViewportPointerMoveCapture(event) {
+    if (
+      !mobileViewport ||
+      event.pointerType !== "touch" ||
+      !viewportPointersRef.current.has(event.pointerId)
+    ) {
+      return
+    }
+
+    viewportPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    })
+
+    const gesture = viewportGestureRef.current
+    if (!gesture || viewportPointersRef.current.size < 2) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    const [first, second] =
+      [...viewportPointersRef.current.values()].slice(0, 2)
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    }
+    const distance = Math.max(
+      1,
+      Math.hypot(second.x - first.x, second.y - first.y)
+    )
+    const angle = Math.atan2(
+      second.y - first.y,
+      second.x - first.x
+    )
+
+    viewportTransformRef.current = {
+      x:
+        gesture.transform.x +
+        midpoint.x -
+        gesture.midpoint.x,
+      y:
+        gesture.transform.y +
+        midpoint.y -
+        gesture.midpoint.y,
+      scale: clamp(
+        gesture.transform.scale *
+          (distance / gesture.distance),
+        0.5,
+        4
+      ),
+      rotation:
+        gesture.transform.rotation +
+        ((angle - gesture.angle) * 180) / Math.PI,
+    }
+
+    applyViewportTransform()
+  }
+
+  function handleViewportPointerEndCapture(event) {
+    if (!mobileViewport || event.pointerType !== "touch") return
+
+    if (suppressTouchRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    viewportPointersRef.current.delete(event.pointerId)
+
+    if (viewportPointersRef.current.size < 2) {
+      viewportGestureRef.current = null
+    }
+
+    if (viewportPointersRef.current.size === 0) {
+      suppressTouchRef.current = false
+    }
+  }
+
+  function scheduleEditRender() {
+    if (editRenderFrameRef.current != null) return
+
+    editRenderFrameRef.current = requestAnimationFrame(() => {
+      editRenderFrameRef.current = null
+      renderLiveCanvas()
+      renderOverlay()
+    })
+  }
+
+  /*
+   * -------------------------------------------------------------------------
    * Canvas setup
    * -------------------------------------------------------------------------
    */
@@ -1800,9 +2066,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     canvas.width =
       CANVAS_WIDTH * dpr
@@ -1849,6 +2113,44 @@ export default function GameCanvas({
     canvas,
     event
   ) {
+    if (
+      mobileViewport &&
+      canvasViewportRef.current &&
+      canvasStageRef.current
+    ) {
+      const viewportRect =
+        canvasViewportRef.current.getBoundingClientRect()
+      const transform = viewportTransformRef.current
+      const size =
+        stageSizeRef.current ||
+        canvasStageRef.current.offsetWidth
+      const centerX =
+        viewportRect.left +
+        viewportRect.width / 2 +
+        transform.x
+      const centerY =
+        viewportRect.top +
+        viewportRect.height / 2 +
+        transform.y
+      const radians =
+        (transform.rotation * Math.PI) / 180
+      const cosine = Math.cos(radians)
+      const sine = Math.sin(radians)
+      const screenX = event.clientX - centerX
+      const screenY = event.clientY - centerY
+      const localX =
+        (screenX * cosine + screenY * sine) /
+        transform.scale
+      const localY =
+        (-screenX * sine + screenY * cosine) /
+        transform.scale
+
+      return [
+        clamp(localX / size + 0.5, 0, 1),
+        clamp(localY / size + 0.5, 0, 1),
+      ]
+    }
+
     const rect =
       canvas.getBoundingClientRect()
 
@@ -1907,7 +2209,7 @@ export default function GameCanvas({
       return
     }
 
-    setCursorPosition({
+    pendingCursorRef.current = {
       x:
         event.clientX -
         rect.left,
@@ -1915,6 +2217,13 @@ export default function GameCanvas({
       y:
         event.clientY -
         rect.top,
+    }
+
+    if (cursorFrameRef.current != null) return
+
+    cursorFrameRef.current = requestAnimationFrame(() => {
+      cursorFrameRef.current = null
+      setCursorPosition(pendingCursorRef.current)
     })
   }
 
@@ -1962,6 +2271,7 @@ export default function GameCanvas({
   }
 
   function handleCursorLeave() {
+    pendingCursorRef.current = null
     setCursorPosition(null)
   }
 
@@ -3584,8 +3894,7 @@ export default function GameCanvas({
       edit.deltaY =
         (edit.deltaY || 0) + dy
 
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
 
       return
     }
@@ -3615,8 +3924,7 @@ export default function GameCanvas({
       })
       updated.bounds = calculateBoundsFromPoints(updated.points)
       edit.previewOperation = updated
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
       return
     }
 
@@ -3656,8 +3964,7 @@ export default function GameCanvas({
       }
 
       edit.previewOperation = updated
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
 
       return
     }
@@ -3745,25 +4052,9 @@ export default function GameCanvas({
         )
 
       edit.previewOperation = updated
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
     }
   }
-
-  /*
-   * -------------------------------------------------------------------------
-   * Pointer move wrapper
-   * -------------------------------------------------------------------------
-   */
-
-  const originalHandlePointerMove =
-    handlePointerMove
-
-  /*
-   * The event listener installed in the effect above points at the function
-   * declared earlier, so we handle selection editing by routing through the
-   * editRef at the top-level handler.
-   */
 
   /*
    * -------------------------------------------------------------------------
@@ -4509,9 +4800,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -4609,8 +4898,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio || 1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -5308,9 +5596,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -5695,61 +5981,6 @@ export default function GameCanvas({
 
   /*
    * -------------------------------------------------------------------------
-   * Pointer handler patch
-   * -------------------------------------------------------------------------
-   *
-   * The original handler above handles drawing. The edit state is checked
-   * first so Select / Anchor / Curve can drag without entering drawing mode.
-   */
-
-  function handlePointerMoveWithEditing(
-    event
-  ) {
-    if (
-      editRef.current
-    ) {
-      event.preventDefault()
-
-      const canvas =
-        canvasRef.current
-
-      if (!canvas) {
-        return
-      }
-
-      handleEditMove(
-        getNormalizedPoint(
-          canvas,
-          event
-        )
-      )
-
-      return
-    }
-
-    handlePointerMove(
-      event
-    )
-  }
-
-  function handlePointerUpWithEditing(
-    event
-  ) {
-    if (
-      editRef.current
-    ) {
-      event.preventDefault()
-      finishEdit(event)
-      return
-    }
-
-    handlePointerUp(
-      event
-    )
-  }
-
-  /*
-   * -------------------------------------------------------------------------
    * Brush cursor
    * -------------------------------------------------------------------------
    */
@@ -5766,15 +5997,14 @@ export default function GameCanvas({
     cursorPosition &&
     isDesktopPointer &&
     tool !== TOOLS.SELECT &&
-    tool !== TOOLS.ANCHOR &&
-    tool !== TOOLS.CURVE &&
-    tool !== TOOLS.ROTATE
+    !EDIT_TOOLS.includes(tool) &&
+    tool !== TOOLS.BUCKET
 
-  const showSelectCursor =
+  const showEditCursor =
     canDraw &&
     cursorPosition &&
     isDesktopPointer &&
-    tool === TOOLS.SELECT
+    (tool === TOOLS.SELECT || EDIT_TOOLS.includes(tool))
 
 
   const resolvedOperations =
@@ -5808,10 +6038,22 @@ export default function GameCanvas({
    */
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl">
+    <div
+      className={
+        mobileViewport
+          ? "relative flex h-full min-h-0 flex-col overflow-hidden bg-zinc-800"
+          : "relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl"
+      }
+    >
 
       {canDraw && (
-        <div className="border-b border-zinc-200 bg-zinc-100">
+        <div
+          className={
+            mobileViewport
+              ? "order-2 shrink-0 border-t border-zinc-300 bg-zinc-100 pb-[env(safe-area-inset-bottom)]"
+              : "border-b border-zinc-200 bg-zinc-100"
+          }
+        >
 
           {/* --------------------------------------------------------------- */}
           {/* Selected-object contextual controls                             */}
@@ -6377,7 +6619,11 @@ export default function GameCanvas({
             </div>
 
             {showColorPicker && (
-              <div className="absolute left-3 top-full z-[90] mt-1 max-h-[calc(100dvh-250px)] w-[272px] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl">
+              <div
+                className={`absolute left-3 z-[90] max-h-[calc(100dvh-250px)] w-[272px] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl ${
+                  mobileViewport ? "bottom-full mb-1" : "top-full mt-1"
+                }`}
+              >
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
@@ -6527,7 +6773,27 @@ export default function GameCanvas({
       {/* Canvas                                                             */}
       {/* ================================================================== */}
 
-      <div className="relative">
+      <div
+        ref={canvasViewportRef}
+        className={
+          mobileViewport
+            ? "relative order-1 min-h-0 flex-1 overflow-hidden bg-zinc-800"
+            : "relative"
+        }
+        style={{ touchAction: mobileViewport ? "none" : undefined }}
+        onPointerDownCapture={handleViewportPointerDownCapture}
+        onPointerMoveCapture={handleViewportPointerMoveCapture}
+        onPointerUpCapture={handleViewportPointerEndCapture}
+        onPointerCancelCapture={handleViewportPointerEndCapture}
+      >
+        <div
+          ref={canvasStageRef}
+          className={
+            mobileViewport
+              ? "absolute left-1/2 top-1/2 origin-center overflow-hidden border border-zinc-600 bg-white shadow-2xl will-change-transform"
+              : "relative"
+          }
+        >
 
         <canvas
           ref={canvasRef}
@@ -6546,7 +6812,7 @@ export default function GameCanvas({
             aspectRatio:
               `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`,
             touchAction:
-              canDraw
+              canDraw || mobileViewport
                 ? "none"
                 : "auto",
           }}
@@ -6620,7 +6886,7 @@ export default function GameCanvas({
           />
         )}
 
-        {showSelectCursor && (
+        {showEditCursor && (
           <div
             className="pointer-events-none absolute z-30 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-900 bg-white/85 shadow-sm"
             style={{
@@ -6629,11 +6895,19 @@ export default function GameCanvas({
               transform: "translate(-50%, -50%)",
             }}
           >
-            <MousePointer2
-              size={15}
-              strokeWidth={2.25}
-              className="text-zinc-900"
-            />
+            {tool === TOOLS.ROTATE ? (
+              <RotateCcw size={15} className="text-zinc-900" />
+            ) : tool === TOOLS.ANCHOR ? (
+              <Anchor size={15} className="text-zinc-900" />
+            ) : tool === TOOLS.CURVE ? (
+              <Waves size={15} className="text-zinc-900" />
+            ) : (
+              <MousePointer2
+                size={15}
+                strokeWidth={2.25}
+                className="text-zinc-900"
+              />
+            )}
           </div>
         )}
 
@@ -6659,6 +6933,24 @@ export default function GameCanvas({
               />
             </div>
           )}
+        </div>
+
+        {mobileViewport && (
+          <>
+            <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-zinc-950/65 px-3 py-1.5 text-[10px] font-medium text-zinc-300 backdrop-blur-sm">
+              Two fingers to move, pinch, and rotate
+            </div>
+
+            <button
+              type="button"
+              onClick={resetViewportTransform}
+              className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-zinc-950/75 text-white shadow-lg backdrop-blur-sm active:scale-95"
+              aria-label="Reset canvas view"
+            >
+              <RotateCcw size={16} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* ================================================================== */}
