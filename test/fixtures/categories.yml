@@ -1,0 +1,5 @@
+one:
+  name: Test category
+  slug: test-category
+  active: true
+  position: 0

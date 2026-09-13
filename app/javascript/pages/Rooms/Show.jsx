@@ -1,5 +1,5 @@
 import { Head } from "@inertiajs/react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { getCableConsumer } from "../../cable"
 import {
   PawPrint,
@@ -13,6 +13,8 @@ import {
   Gamepad2,
   HeartHandshake,
   CircleHelp,
+  MessageCircle,
+  X,
 } from "lucide-react"
 import GameCanvas from "../../components/GameCanvas"
 import RoundCarousel from "../../components/RoundCarousel"
@@ -34,6 +36,37 @@ const CATEGORY_ICONS = {
   games: Gamepad2,
   sobriety: HeartHandshake,
   random: Sparkles,
+}
+
+function subscribeToMobileLayout(notify) {
+  const media = window.matchMedia("(hover: none) and (pointer: coarse)")
+  media.addEventListener("change", notify)
+  return () => media.removeEventListener("change", notify)
+}
+
+function getMobileLayoutSnapshot() {
+  return (
+    navigator.maxTouchPoints > 0 ||
+    window.matchMedia("(hover: none) and (pointer: coarse)").matches
+  )
+}
+
+function getServerMobileLayoutSnapshot() {
+  return false
+}
+
+function subscribeToLandscapeLayout(notify) {
+  const media = window.matchMedia(
+    "(orientation: landscape) and (min-width: 768px)"
+  )
+  media.addEventListener("change", notify)
+  return () => media.removeEventListener("change", notify)
+}
+
+function getLandscapeLayoutSnapshot() {
+  return window.matchMedia(
+    "(orientation: landscape) and (min-width: 768px)"
+  ).matches
 }
 
 function CategoryIcon({ slug, className = "h-5 w-5" }) {
@@ -232,10 +265,23 @@ export default function Show({
   const [wordOptions, setWordOptions] = useState([])
   const [gameError, setGameError] = useState(null)
   const [strokes, setStrokes] = useState([])
-  const [guesses, setGuesses] = useState([])
+  const [guesses, setGuesses] = useState(
+    Array.isArray(initialCurrentRound?.guesses)
+      ? initialCurrentRound.guesses
+      : []
+  )
+  const [mobileGuessToast, setMobileGuessToast] = useState(null)
+  const [showMobileGuesses, setShowMobileGuesses] = useState(false)
+  const [unseenGuessCount, setUnseenGuessCount] = useState(0)
 
   const strokesRef = useRef([])
-  const guessesRef = useRef([])
+  const guessesRef = useRef(
+    Array.isArray(initialCurrentRound?.guesses)
+      ? initialCurrentRound.guesses
+      : []
+  )
+  const mobileGuessesOpenRef = useRef(false)
+  const mobileGuessTimerRef = useRef(null)
 
   const roundStrokesRef = useRef({})
   const roundGuessesRef = useRef({})
@@ -246,9 +292,21 @@ export default function Show({
   const [finalScores, setFinalScores] = useState([])
   const [readyPlayerIds, setReadyPlayerIds] = useState([])
   const [isReady, setIsReady] = useState(false)
-  const [selectedWord, setSelectedWord] = useState(null)
+  const [selectedWord, setSelectedWord] = useState(
+    initialCurrentRound?.word || null
+  )
   const [liveStrokes, setLiveStrokes] = useState({})
   const [completedRounds, setCompletedRounds] = useState([])
+  const mobileDrawingLayout = useSyncExternalStore(
+    subscribeToMobileLayout,
+    getMobileLayoutSnapshot,
+    getServerMobileLayoutSnapshot
+  )
+  const touchLandscapeLayout = useSyncExternalStore(
+    subscribeToLandscapeLayout,
+    getLandscapeLayoutSnapshot,
+    getServerMobileLayoutSnapshot
+  )
 
   const subscriptionRef = useRef(null)
   const currentRoundRef = useRef(initialCurrentRound)
@@ -357,7 +415,59 @@ useEffect(() => {
   function replaceGuesses(nextGuesses) {
     guessesRef.current = nextGuesses
     setGuesses(nextGuesses)
+
+    if (nextGuesses.length === 0) {
+      setMobileGuessToast(null)
+      setUnseenGuessCount(0)
+      setShowMobileGuesses(false)
+      mobileGuessesOpenRef.current = false
+    }
   }
+
+  function dismissMobileGuessToast() {
+    if (mobileGuessTimerRef.current) {
+      clearTimeout(mobileGuessTimerRef.current)
+      mobileGuessTimerRef.current = null
+    }
+
+    setMobileGuessToast(null)
+  }
+
+  function announceMobileGuess(guess) {
+    if (!guess || guess.correct) return
+
+    dismissMobileGuessToast()
+    setMobileGuessToast(guess)
+
+    if (!mobileGuessesOpenRef.current) {
+      setUnseenGuessCount((count) => count + 1)
+    }
+
+    mobileGuessTimerRef.current = setTimeout(() => {
+      mobileGuessTimerRef.current = null
+      setMobileGuessToast(null)
+    }, 5000)
+  }
+
+  function openMobileGuesses() {
+    dismissMobileGuessToast()
+    mobileGuessesOpenRef.current = true
+    setShowMobileGuesses(true)
+    setUnseenGuessCount(0)
+  }
+
+  function closeMobileGuesses() {
+    mobileGuessesOpenRef.current = false
+    setShowMobileGuesses(false)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (mobileGuessTimerRef.current) {
+        clearTimeout(mobileGuessTimerRef.current)
+      }
+    }
+  }, [])
 
   function recordRoundStrokes(roundId, nextStrokes) {
   if (roundId == null) return
@@ -563,8 +673,13 @@ useEffect(() => {
 
           setSelectedWord(null)
           setGameError(null)
+          setLiveStrokes({})
           replaceStrokes([])
-          replaceGuesses([])
+          replaceGuesses(
+            Array.isArray(data.round?.guesses)
+              ? data.round.guesses
+              : []
+          )
           setCorrectGuesser(null)
 
           return
@@ -592,6 +707,7 @@ useEffect(() => {
           setReadyPlayerIds([])
           setIsReady(false)
           setWordOptions([])
+          setLiveStrokes({})
 
           replaceStrokes(
             Array.isArray(data.round?.strokes)
@@ -599,7 +715,11 @@ useEffect(() => {
               : []
           )
 
-          replaceGuesses([])
+          replaceGuesses(
+            Array.isArray(data.round?.guesses)
+              ? data.round.guesses
+              : []
+          )
 
           setCorrectGuesser(null)
           setRoundResult(null)
@@ -702,6 +822,14 @@ useEffect(() => {
             return
           }
 
+          if (data.round?.started_at) {
+            setCurrentRound((current) => ({
+              ...current,
+              started_at: data.round.started_at,
+              duration: data.round.duration,
+            }))
+          }
+
           setLiveStrokes((current) => ({
             ...current,
             [stroke.id]: stroke,
@@ -726,9 +854,22 @@ useEffect(() => {
           }
 
           setLiveStrokes((current) => {
+            if (incoming.cancelled) {
+              const next = { ...current }
+              delete next[incoming.id]
+              return next
+            }
+
             const existing = current[incoming.id]
 
             if (!existing) {
+              return {
+                ...current,
+                [incoming.id]: incoming,
+              }
+            }
+
+            if (incoming.replace) {
               return {
                 ...current,
                 [incoming.id]: incoming,
@@ -809,6 +950,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(roundId, data.strokes)
+            return
+          }
+
           // The drawer optimistically inserts the operation before Rails
           // broadcasts the canonical persisted version. Replace that
           // optimistic copy when the server echo arrives so fields such as
@@ -856,6 +1003,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
+
           if (current.some((existing) => existing?.id === operation.id)) {
             return
           }
@@ -882,6 +1035,12 @@ useEffect(() => {
           }
 
           const current = strokesRef.current
+
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
 
           if (current.some((existing) => existing?.id === operation.id)) {
             return
@@ -918,6 +1077,12 @@ useEffect(() => {
           }
 
           const current = strokesRef.current
+
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
 
           const next = current.filter(
             (stroke) =>
@@ -965,6 +1130,12 @@ useEffect(() => {
 
           const current = strokesRef.current
 
+          if (Array.isArray(data.strokes)) {
+            replaceStrokes(data.strokes)
+            recordRoundStrokes(data.round?.id, data.strokes)
+            return
+          }
+
           if (
             current.some(
               (existing) => existing?.id === operation.id
@@ -1002,12 +1173,17 @@ useEffect(() => {
             return
           }
 
-          strokesRef.current = []
-          setStrokes([])
+          const next = Array.isArray(data.strokes)
+            ? data.strokes
+            : data.operation?.id
+              ? [...strokesRef.current, data.operation]
+              : []
+
+          replaceStrokes(next)
 
           recordRoundStrokes(
             data.round?.id,
-            []
+            next
           )
 
           return
@@ -1033,6 +1209,7 @@ useEffect(() => {
         // --------------------------------------------------------------
 
         if (data.type === "round_ended") {
+          setLiveStrokes({})
           console.log("[Game] Round ended:", data)
 
           const round = data.round
@@ -1163,6 +1340,8 @@ useEffect(() => {
             data.round?.id,
             next
           )
+
+          announceMobileGuess(data.guess)
 
           return
         }
@@ -1416,7 +1595,10 @@ function drawStroke(stroke) {
 
   subscriptionRef.current.perform(
     command,
-    stroke
+    {
+      ...stroke,
+      round_id: roundId,
+    }
   )
 }
 
@@ -1433,28 +1615,55 @@ function undoStroke(strokeId) {
     "undo_stroke",
     {
       stroke_id: strokeId,
+      round_id: currentRoundRef.current.id,
     }
   )
 }
 
 function sendLiveStroke(data) {
-  if (!subscriptionRef.current) {
+  if (
+    !subscriptionRef.current ||
+    !currentRoundRef.current?.id
+  ) {
     return
   }
 
   subscriptionRef.current.perform(
     "draw_live",
-    data
+    {
+      ...data,
+      round_id: currentRoundRef.current.id,
+    }
   )
 }
 
-  function clearCanvas() {
-    if (!subscriptionRef.current) {
+  function clearCanvas(operation) {
+    if (
+      !subscriptionRef.current ||
+      !currentRoundRef.current?.id
+    ) {
       return
     }
 
+    if (!operation?.id || operation.type !== "canvas_clear") {
+      return
+    }
+
+    const current = strokesRef.current
+
+    if (!current.some((existing) => existing?.id === operation.id)) {
+      const next = [...current, operation]
+      replaceStrokes(next)
+      recordRoundStrokes(currentRoundRef.current?.id, next)
+    }
+
     subscriptionRef.current.perform(
-      "clear_canvas"
+      "clear_canvas",
+      {
+        id: operation.id,
+        type: "canvas_clear",
+        round_id: currentRoundRef.current.id,
+      }
     )
   }
 
@@ -1997,7 +2206,8 @@ return (
         {/* MOBILE DRAWING SCREEN                                         */}
         {/* ============================================================= */}
 
-        <section className="fixed inset-0 z-50 overflow-hidden bg-zinc-950 md:hidden">
+        {mobileDrawingLayout === true && (
+        <section className="fixed inset-0 z-50 overflow-hidden bg-zinc-950">
           <div
             className="relative h-[100dvh] w-full overflow-hidden overscroll-none"
             style={{
@@ -2010,16 +2220,11 @@ return (
             {/* ========================================================= */}
 
             <div
-              className="absolute inset-x-0 bottom-0 overflow-hidden bg-white"
+              className="absolute inset-x-0 bottom-0 overflow-hidden bg-zinc-800"
               style={{
-                /*
-                * Reserve the top of the screen for the game HUD.
-                *
-                * GameCanvas contains its own drawing toolbar, so the
-                * entire GameCanvas needs to begin BELOW the HUD rather
-                * than underneath it.
-                */
-                top: "calc(env(safe-area-inset-top) + 108px)",
+                top: touchLandscapeLayout
+                  ? "0"
+                  : "calc(env(safe-area-inset-top) + 72px)",
               }}
             >
               <div className="drawing-canvas-shell absolute inset-0 overflow-hidden">
@@ -2029,13 +2234,14 @@ return (
                   liveStrokes={liveStrokes}
                   canDraw={
                     isDrawer &&
-                    timeLeft !== null &&
-                    timeLeft > 0
+                    (timeLeft === null || timeLeft > 0)
                   }
                   onStroke={drawStroke}
                   onLiveStroke={sendLiveStroke}
                   onUndo={undoStroke}
                   onClear={clearCanvas}
+                  mobileViewport
+                  toolbarPlacement={touchLandscapeLayout ? "right" : "bottom"}
                 />
               </div>
             </div>
@@ -2044,118 +2250,145 @@ return (
             {/* TOP HUD                                                     */}
             {/* ========================================================= */}
 
-            <div
-              className="pointer-events-none absolute inset-x-0 top-0 z-50"
-              style={{
-                paddingTop: "calc(env(safe-area-inset-top) + 10px)",
-              }}
+            <header
+              className={
+                touchLandscapeLayout
+                  ? "absolute right-0 top-0 z-[70] w-[300px] border-b border-white/10 bg-zinc-950 text-white shadow-lg"
+                  : "absolute inset-x-0 top-0 z-[70] h-[calc(env(safe-area-inset-top)+72px)] border-b border-white/10 bg-zinc-950 text-white shadow-lg"
+              }
+              style={{ paddingTop: touchLandscapeLayout ? 0 : "env(safe-area-inset-top)" }}
             >
-              <div className="flex items-start justify-between px-3">
-                {/* Round / drawer */}
-
-                <div className="rounded-2xl border border-white/10 bg-zinc-950/90 px-4 py-2.5 shadow-xl backdrop-blur-md">
-                  <div className="text-[9px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+              <div className="grid h-[72px] grid-cols-[minmax(0,1fr)_minmax(120px,1.35fr)_auto] items-center gap-2 px-3">
+                <div className="min-w-0">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
                     Round {currentRound.number}
                   </div>
-
-                  <div className="mt-0.5 max-w-[190px] truncate text-sm font-semibold text-white">
+                  <div className="truncate text-xs font-semibold text-zinc-200">
                     {isDrawer
                       ? "Your turn"
-                      : `${currentRound.drawer.name} is drawing`}
+                      : `${currentRound.drawer.name} draws`}
                   </div>
                 </div>
 
-                {/* Timer */}
+                <div className="relative min-w-0 text-center">
+                  <div className="text-[8px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+                    {isDrawer ? "Your word" : "Now drawing"}
+                  </div>
+                  <div className="truncate text-base font-bold uppercase tracking-tight">
+                    {isDrawer && selectedWord ? selectedWord : "Guess it"}
+                  </div>
 
-                {timeLeft !== null && (
-                  <div
-                    className={[
-                      "flex h-16 min-w-16 items-center justify-center rounded-2xl border px-4 font-mono text-2xl font-bold shadow-xl backdrop-blur-md",
-                      timeLeft <= 10
-                        ? "border-red-500/50 bg-red-950/90 text-red-400"
-                        : "border-white/10 bg-zinc-950/90 text-white",
-                    ].join(" ")}
+                  {mobileGuessToast && (
+                    <div
+                      className="absolute inset-x-[-20px] top-[-8px] z-20 flex min-h-[52px] items-center gap-2 rounded-xl border border-white/10 bg-zinc-800 px-3 text-left shadow-2xl"
+                    >
+                      <button
+                        type="button"
+                        onClick={openMobileGuesses}
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      >
+                        <MessageCircle size={15} className="shrink-0 text-zinc-400" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[10px] font-semibold text-zinc-400">
+                            {mobileGuessToast.player?.name || "Player"}
+                          </span>
+                          <span className="block truncate text-xs font-medium text-white">
+                            {mobileGuessToast.text}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Dismiss guess"
+                        onClick={dismissMobileGuessToast}
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-zinc-400"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={openMobileGuesses}
+                    className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-900 text-zinc-200 active:bg-zinc-800"
+                    aria-label="Open guesses"
                   >
-                    {timeLeft}
-                  </div>
-                )}
-              </div>
-            </div>
+                    <MessageCircle size={18} />
+                    {unseenGuessCount > 0 && (
+                      <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white">
+                        {Math.min(unseenGuessCount, 99)}
+                      </span>
+                    )}
+                  </button>
 
-            {/* ========================================================= */}
-            {/* DRAWER WORD                                                 */}
-            {/* ========================================================= */}
-
-            {isDrawer && selectedWord && (
-              <div
-                className="pointer-events-none absolute inset-x-0 z-50 flex justify-center px-3"
-                style={{
-                  /*
-                  * This is now below the HUD but above the drawing surface.
-                  * It does NOT overlap the toolbar because the GameCanvas
-                  * itself starts at 108px.
-                  */
-                  top: "calc(env(safe-area-inset-top) + 18px)",
-                }}
-              >
-                <div className="rounded-2xl border border-white/10 bg-zinc-950/90 px-5 py-2.5 text-center shadow-xl backdrop-blur-md">
-                  <div className="text-[8px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                    Your word
-                  </div>
-
-                  <div className="mt-0.5 text-lg font-bold uppercase tracking-tight text-white">
-                    {selectedWord}
+                  <div
+                    className={`flex h-10 min-w-12 items-center justify-center rounded-xl px-2 font-mono text-lg font-bold ${
+                      timeLeft !== null && timeLeft <= 10
+                        ? "bg-red-950 text-red-400"
+                        : "bg-zinc-900 text-white"
+                    }`}
+                    aria-label={
+                      timeLeft === null
+                        ? "Timer starts with the first stroke"
+                        : `${timeLeft} seconds remaining`
+                    }
+                  >
+                    {timeLeft ?? game_room.round_duration}
                   </div>
                 </div>
               </div>
-            )}
+            </header>
 
-            {/* ========================================================= */}
-            {/* FLOATING GUESSES                                            */}
-            {/* ========================================================= */}
+            {showMobileGuesses && (
+              <div
+                className="absolute inset-x-3 z-[80] max-h-[55dvh] overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950/98 text-white shadow-2xl"
+                style={{ top: "calc(env(safe-area-inset-top) + 80px)" }}
+              >
+                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-bold">Guesses</div>
+                    <div className="text-[10px] text-zinc-500">Newest first</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeMobileGuesses}
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900 text-zinc-300"
+                    aria-label="Close guesses"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
 
-            <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-50"
-              style={{
-                paddingBottom:
-                  "calc(env(safe-area-inset-bottom) + 92px)",
-              }}
-            >
-              <div className="px-3">
-                <div className="ml-auto w-[min(82vw,340px)]">
-                  {guesses.filter(
-                    (guess) => !guess.correct
-                  ).length > 0 && (
-                    <div className="max-h-[24dvh] overflow-hidden">
-                      <div className="flex flex-col items-end gap-1.5">
-                        {guesses
-                          .filter(
-                            (guess) => !guess.correct
-                          )
-                          .slice(-5)
-                          .map((guess) => (
-                            <div
-                              key={guess.id}
-                              className="max-w-[88%] rounded-2xl border border-zinc-700/70 bg-zinc-950/85 px-3 py-2 shadow-lg backdrop-blur-md"
-                            >
-                              <div className="flex items-baseline gap-2">
-                                <span className="shrink-0 text-[10px] font-semibold text-zinc-400">
-                                  {guess.player?.name ||
-                                    "Player"}
-                                </span>
-
-                                <span className="truncate text-xs font-medium text-white">
-                                  {guess.text}
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                      </div>
+                <div className="max-h-[calc(55dvh-61px)] overflow-y-auto overscroll-contain">
+                  {guesses.filter((guess) => !guess.correct).length > 0 ? (
+                    guesses
+                      .filter((guess) => !guess.correct)
+                      .slice()
+                      .reverse()
+                      .map((guess) => (
+                        <div
+                          key={guess.id}
+                          className="border-b border-zinc-800 px-4 py-3 last:border-0"
+                        >
+                          <div className="text-[10px] font-semibold text-zinc-500">
+                            {guess.player?.name || "Player"}
+                          </div>
+                          <div className="mt-0.5 text-sm text-zinc-100">
+                            {guess.text}
+                          </div>
+                        </div>
+                      ))
+                  ) : (
+                    <div className="px-4 py-8 text-center text-sm text-zinc-500">
+                      No guesses yet.
                     </div>
                   )}
                 </div>
               </div>
-            </div>
+            )}
 
             {/* ========================================================= */}
             {/* GUESS INPUT                                                 */}
@@ -2199,57 +2432,16 @@ return (
                 </div>
               )}
 
-            {/* ========================================================= */}
-            {/* DRAWER CLEAR                                                */}
-            {/* ========================================================= */}
-
-            {isDrawer && (
-              <div
-                className="pointer-events-none absolute bottom-0 left-0 z-[60]"
-                style={{
-                  paddingBottom:
-                    "calc(env(safe-area-inset-bottom) + 12px)",
-                }}
-              >
-                <div className="px-3">
-                  <button
-                    type="button"
-                    onClick={clearCanvas}
-                    disabled={
-                      timeLeft === null ||
-                      timeLeft <= 0 ||
-                      strokes.length === 0
-                    }
-                    className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-zinc-700/80 bg-zinc-950/90 px-4 py-3 text-sm font-semibold text-zinc-300 shadow-xl backdrop-blur-md transition active:scale-95 disabled:opacity-30"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      className="h-4 w-4"
-                      aria-hidden="true"
-                    >
-                      <path d="M3 6h18" />
-                      <path d="M8 6V4h8v2" />
-                      <path d="M19 6l-1 14H6L5 6" />
-                      <path d="M10 11v5" />
-                      <path d="M14 11v5" />
-                    </svg>
-
-                    Clear
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         </section>
+        )}
 
       {/* ============================================================= */}
       {/* DESKTOP DRAWING SCREEN                                        */}
       {/* ============================================================= */}
 
-      <div className="hidden md:block">
+      {mobileDrawingLayout === false && (
+      <div>
         <GameWorkspace
           aside={
             <>
@@ -2267,20 +2459,6 @@ return (
                     </p>
                   </div>
 
-                  {isDrawer && (
-                    <button
-                      type="button"
-                      onClick={clearCanvas}
-                      disabled={
-                        timeLeft === null ||
-                        timeLeft <= 0 ||
-                        strokes.length === 0
-                      }
-                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-                    >
-                      Clear
-                    </button>
-                  )}
                 </div>
               </div>
 
@@ -2444,8 +2622,7 @@ return (
               liveStrokes={liveStrokes}
               canDraw={
                 isDrawer &&
-                timeLeft !== null &&
-                timeLeft > 0
+                (timeLeft === null || timeLeft > 0)
               }
               onStroke={drawStroke}
               onLiveStroke={sendLiveStroke}
@@ -2455,6 +2632,7 @@ return (
           </div>
         </GameWorkspace>
       </div>
+      )}
     </>
   )}
 

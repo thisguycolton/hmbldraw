@@ -169,8 +169,20 @@ class RoomsController < ApplicationController
           id: @current_round.drawer.id,
           name: @current_round.drawer.name
         },
+        word: (
+          @current_round.word if
+            @player && @current_round.drawer_id == @player.id
+        ),
         started_at: @current_round.started_at&.iso8601,
-        duration: @game_room.round_duration
+        duration: @game_room.round_duration,
+        guesses: @current_round.guesses.includes(:player).order(:created_at).map do |guess|
+          {
+            id: guess.id,
+            player: { id: guess.player.id, name: guess.player.name },
+            text: guess.text,
+            correct: guess.correct
+          }
+        end
       }
     }
 end

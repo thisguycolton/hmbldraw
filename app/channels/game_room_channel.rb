@@ -207,26 +207,24 @@ end
   # --------------------------------------------------------------------------
 
 def draw_live(data)
-  round = live_drawing_round!
+  data = data.to_h.stringify_keys
+  round = active_editor_round!(data, cached: true)
+  return unless round
 
   unless round.drawer_id == @player.id
     raise GameRoomGame::Error,
           "Only the drawer can draw."
   end
 
-  deadline =
-    round.started_at +
-    @game_room.round_duration.seconds
-
-  if Time.current >= deadline
-    raise GameRoomGame::Error,
-          "Time is up."
-  end
-
   payload = sanitize_live_stroke(data)
 
   case payload[:type]
   when "start"
+    round = GameRoomGame.start_drawing_timer!(
+      @game_room,
+      @player
+    ) if round.started_at.nil?
+
     GameRoomBroadcaster.stroke_started(
       @game_room,
       round,
@@ -234,6 +232,13 @@ def draw_live(data)
     )
 
   when "points"
+    GameRoomBroadcaster.stroke_points(
+      @game_room,
+      round,
+      payload[:stroke]
+    )
+
+  when "cancel"
     GameRoomBroadcaster.stroke_points(
       @game_room,
       round,
@@ -304,13 +309,24 @@ rescue StandardError => e
 end
 
 def draw_stroke(data)
+  data = data.to_h.stringify_keys
   stroke = sanitize_stroke(data)
 
   # --------------------------------------------------------------------------
   # Validate operation-specific payload
   # --------------------------------------------------------------------------
 
-  if stroke[:type] == "fill"
+  if stroke[:type] == "erase"
+    if Array(stroke[:changes]).empty?
+      transmit(
+        {
+          type: "game_error",
+          message: "Invalid erase operation."
+        }
+      )
+      return
+    end
+  elsif stroke[:type] == "fill"
     point = Array(stroke[:point])
 
     unless point.length == 2
@@ -346,18 +362,14 @@ def draw_stroke(data)
   # Persist the operation
   # --------------------------------------------------------------------------
 
-  live_round = live_drawing_round!
+  active_round = active_editor_round!(data)
+  return unless active_round
 
-  deadline =
-    live_round.started_at +
-    @game_room.round_duration.seconds
-
-  if Time.current >= deadline
-    transmit(
-      type: "game_error",
-      message: "Time is up."
+  if active_round.started_at.nil?
+    GameRoomGame.start_drawing_timer!(
+      @game_room,
+      @player
     )
-    return
   end
 
   round =
@@ -399,7 +411,8 @@ def draw_stroke(data)
         id: round.id,
         number: round.number
       },
-      stroke: saved_stroke
+      stroke: saved_stroke,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -421,12 +434,10 @@ rescue StandardError => e
     e.backtrace.first(10).join("\n")
   )
 
-  transmit(
-    {
-      type: "game_error",
-      message: "Unable to save that stroke."
-    }
-  )
+  message = "Unable to save that stroke."
+  message = "#{message} #{e.class}: #{e.message}" if Rails.env.development?
+
+  transmit(type: "game_error", message: message)
 end
 
 # --------------------------------------------------------------------------
@@ -434,6 +445,8 @@ end
 # --------------------------------------------------------------------------
 
 def reorder_layers(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_layer_reorder(data)
 
   round =
@@ -458,7 +471,8 @@ def reorder_layers(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -481,6 +495,8 @@ end
 # --------------------------------------------------------------------------
 
 def update_object(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_object_update(data)
 
   round =
@@ -505,7 +521,8 @@ def update_object(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -515,6 +532,7 @@ rescue StandardError => e
   Rails.logger.error(
     "[GameRoomChannel] update_object failed: #{e.class}: #{e.message}"
   )
+  Rails.logger.error(e.backtrace.first(10).join("\n"))
   transmit(type: "game_error", message: "Unable to update that drawing object.")
 end
 
@@ -523,6 +541,8 @@ end
 # --------------------------------------------------------------------------
 
 def delete_object(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_object_delete(data)
 
   round =
@@ -547,7 +567,8 @@ def delete_object(data)
         id: round.id,
         number: round.number
       },
-      operation: saved_operation
+      operation: saved_operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -557,6 +578,7 @@ rescue StandardError => e
   Rails.logger.error(
     "[GameRoomChannel] delete_object failed: #{e.class}: #{e.message}"
   )
+  Rails.logger.error(e.backtrace.first(10).join("\n"))
   transmit(type: "game_error", message: "Unable to delete that drawing object.")
 end
 
@@ -565,6 +587,8 @@ end
 # --------------------------------------------------------------------------
 
 def undo_stroke(data)
+  return unless active_editor_round!(data)
+
   stroke_id =
     data["stroke_id"].to_s.first(100)
 
@@ -602,7 +626,8 @@ def undo_stroke(data)
         id: round.id,
         number: round.number
       },
-      stroke_id: stroke_id
+      stroke_id: stroke_id,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -636,7 +661,11 @@ end
   # Clear canvas
   # --------------------------------------------------------------------------
 
-  def clear_canvas
+  def clear_canvas(data = {})
+  return unless active_editor_round!(data)
+
+  operation = sanitize_canvas_clear(data)
+
   # --------------------------------------------------------------
   # Clear the authoritative persisted drawing.
   # --------------------------------------------------------------
@@ -644,7 +673,8 @@ end
   round =
     GameRoomGame.clear_canvas!(
       @game_room,
-      @player
+      @player,
+      operation
     )
 
   # --------------------------------------------------------------
@@ -658,7 +688,9 @@ end
       round: {
         id: round.id,
         number: round.number
-      }
+      },
+      operation: operation,
+      strokes: Array(round.strokes)
     }
   )
 
@@ -705,44 +737,45 @@ def unsubscribed
 
   GameRoomBroadcaster.lobby_updated(game_room)
 
-  # ------------------------------------------------------------------------
-  # If this player was the active drawer, immediately end the round.
-  # ------------------------------------------------------------------------
-
-  game_room.reload
-
-  return unless game_room.status == "drawing"
-
-  round = game_room.rounds.find_by(
-    game_number: game_room.game_number,
-    number: game_room.current_round
-  )
-
-  return unless round&.status == "drawing"
-  return unless round.drawer_id == player.id
-
-  Rails.logger.info(
-    "[GameRoomChannel] Drawer disconnected; " \
-    "ending round immediately " \
-    "room=#{game_room.code} " \
-    "player=#{player.id} " \
-    "round=#{round.id}"
-  )
-
-  GameRoomGame
-    .new(game_room, player)
-    .end_round!(
-      round,
-      reason: :drawer_disconnected
-    )
+  # A WebSocket disconnect is not the same as leaving the room. Refreshes,
+  # mobile network changes, and HMR all disconnect briefly. Keep the active
+  # round alive so the drawer can reconnect; the existing timeout job remains
+  # responsible for ending an abandoned round.
 end
 
   private
 
-  def live_drawing_round!
+  def active_editor_round!(data, cached: false)
+  data = data.to_h.stringify_keys
+  round = live_drawing_round!(
+    data["round_id"],
+    refresh: !cached
+  )
+
+  return round unless round.started_at
+
+  deadline =
+    round.started_at +
+    @game_room.round_duration.seconds
+
+  if Time.current >= deadline
+    GameRoomGame.end_round!(
+      @game_room,
+      round
+    )
+    return nil
+  end
+
+  round
+end
+
+  def live_drawing_round!(expected_round_id = nil, refresh: false)
+  expected_round_id = expected_round_id.to_i if expected_round_id.present?
   round = @live_drawing_round
 
-  if round
+  if !refresh &&
+     round &&
+     (!expected_round_id || round.id == expected_round_id)
     return round
   end
 
@@ -755,6 +788,11 @@ end
     )
 
   raise GameRoomGame::Error, "No active round." unless round
+
+  if expected_round_id && round.id != expected_round_id
+    raise GameRoomGame::Error,
+          "The drawing round changed. Please try again."
+  end
 
   unless @game_room.status == "drawing" &&
          round.status == "drawing"
@@ -804,6 +842,16 @@ def sync_current_game_state
   )
 
   return unless round
+
+  if round.status == "drawing" &&
+     round.started_at &&
+     Time.current >= round.started_at + @game_room.round_duration.seconds
+    GameRoomGame.end_round!(
+      @game_room,
+      round
+    )
+    return
+  end
 
   # --------------------------------------------------------------------------
   # Ready / starting phase
@@ -902,9 +950,17 @@ def sync_current_game_state
             id: round.drawer.id,
             name: round.drawer.name
           },
-          started_at: round.started_at.iso8601,
+          started_at: round.started_at&.iso8601,
           duration: @game_room.round_duration,
-          strokes: Array(round.strokes)
+          strokes: Array(round.strokes),
+          guesses: round.guesses.includes(:player).order(:created_at).map do |guess|
+            {
+              id: guess.id,
+              player: { id: guess.player.id, name: guess.player.name },
+              text: guess.text,
+              correct: guess.correct
+            }
+          end
         }
       }
     )
@@ -1035,7 +1091,7 @@ end
   data = data.to_h.stringify_keys
   type = data["type"].to_s
 
-  unless %w[start points].include?(type)
+  unless %w[start points cancel].include?(type)
     raise GameRoomGame::Error,
           "Invalid live drawing event."
   end
@@ -1046,6 +1102,8 @@ end
     raise GameRoomGame::Error,
           "Invalid live stroke."
   end
+
+  raw_stroke = raw_stroke.stringify_keys
 
   operation_type = raw_stroke["type"].to_s
   operation_type = "stroke" if operation_type.blank?
@@ -1061,6 +1119,17 @@ end
   id = raw_stroke["id"].to_s.first(100)
 
   raise GameRoomGame::Error, "Invalid stroke ID." if id.blank?
+
+  if type == "cancel"
+    return {
+      type: type,
+      stroke: {
+        id: id,
+        cancelled: true,
+        points: []
+      }
+    }
+  end
 
   if operation_type == "shape"
     shape = raw_stroke["shape"].to_s
@@ -1151,6 +1220,7 @@ end
       width: width,
       pen: !!raw_stroke["pen"],
       closed: !!raw_stroke["closed"],
+      replace: !!raw_stroke["replace"],
       fill: (raw_stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ? raw_stroke["fill"].to_s : nil)
     }
   }
@@ -1182,6 +1252,19 @@ end
     }
   end
 
+  def sanitize_canvas_clear(data)
+    data = data.to_h.stringify_keys
+    nested = data["operation"].is_a?(Hash) ? data["operation"].stringify_keys : {}
+    id = (data["id"].presence || nested["id"].presence || SecureRandom.uuid)
+      .to_s
+      .first(100)
+
+    {
+      id: id,
+      type: "canvas_clear"
+    }
+  end
+
   # --------------------------------------------------------------------------
   # Sanitize vector editor operations
   # --------------------------------------------------------------------------
@@ -1196,7 +1279,7 @@ end
     raise GameRoomGame::Error, "Invalid drawing object ID." if object_id.blank?
     raise GameRoomGame::Error, "Invalid drawing update." unless changes.is_a?(Hash)
 
-    allowed = %w[points bounds color width shape start end pen closed type fill hidden]
+    allowed = %w[points bounds color width shape start end pen closed type fill hidden pathMode]
     changes = changes.stringify_keys.slice(*allowed)
 
     if changes["points"]
@@ -1261,6 +1344,14 @@ end
       raise GameRoomGame::Error, "Invalid drawing shape."
     end
 
+    if changes.key?("pathMode")
+      path_mode = changes["pathMode"].to_s
+      unless %w[linear smooth].include?(path_mode)
+        raise GameRoomGame::Error, "Invalid drawing path mode."
+      end
+      changes["pathMode"] = path_mode
+    end
+
     { id: id, type: "object_update", objectId: object_id, changes: changes }
   end
 
@@ -1295,7 +1386,7 @@ end
   raise GameRoomGame::Error,
         "Invalid drawing operation ID." if id.blank?
 
-  unless %w[stroke eraser fill shape].include?(type)
+  unless %w[stroke eraser fill shape erase].include?(type)
     raise GameRoomGame::Error,
           "Invalid drawing operation."
   end
@@ -1303,6 +1394,40 @@ end
   # --------------------------------------------------------------------------
   # Shape
   # --------------------------------------------------------------------------
+
+  if type == "erase"
+    changes = Array(data["changes"]).first(500).map do |change|
+      change = change.to_h.stringify_keys
+      object_id = change["objectId"].to_s.first(100)
+      raise GameRoomGame::Error, "Invalid erased object ID." if object_id.blank?
+
+      after = Array(change["after"]).first(500).map do |object|
+        normalized_object = sanitize_stroke(object)
+        unless %w[stroke shape].include?(normalized_object[:type])
+          raise GameRoomGame::Error, "Invalid erased object geometry."
+        end
+        normalized_object
+      end
+
+      {
+        objectId: object_id,
+        after: after
+      }
+    end
+
+    raise GameRoomGame::Error, "Invalid erase operation." if changes.empty?
+
+    object_ids = changes.map { |change| change[:objectId] }
+    unless object_ids.uniq.length == object_ids.length
+      raise GameRoomGame::Error, "Invalid erase operation."
+    end
+
+    return {
+      id: id,
+      type: "erase",
+      changes: changes
+    }
+  end
 
   if type == "shape"
     shape = data["shape"].to_s
@@ -1460,7 +1585,7 @@ end
       .to_s
       .first(100)
 
-  {
+  normalized = {
     id: id,
     type: type,
     points: points,
@@ -1474,5 +1599,9 @@ end
         nil
     )
   }
+
+  path_mode = data["pathMode"].to_s
+  normalized[:pathMode] = path_mode if %w[linear smooth].include?(path_mode)
+  normalized
 end
 end

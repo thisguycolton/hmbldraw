@@ -2,10 +2,10 @@
 
 one:
   text: MyString
-  category: MyString
+  category: one
   difficulty: MyString
 
 two:
-  text: MyString
-  category: MyString
+  text: OtherString
+  category: one
   difficulty: MyString

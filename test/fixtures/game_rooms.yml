@@ -1,7 +1,7 @@
 # Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
 
 one:
-  code: MyString
+  code: TEST
   status: MyString
   current_round: 1
   total_rounds: 1
@@ -13,7 +13,7 @@ one:
   name: MyString
 
 two:
-  code: MyString
+  code: OTHR
   status: MyString
   current_round: 1
   total_rounds: 1

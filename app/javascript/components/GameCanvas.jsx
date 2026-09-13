@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   ChevronDown,
   Circle,
@@ -7,6 +7,7 @@ import {
   EyeOff,
   Layers,
   PaintBucket,
+  Palette,
   Pencil,
   PenLine,
   RotateCcw,
@@ -24,44 +25,38 @@ import {
   ChevronsDown,
 } from "lucide-react"
 
+import { hexToHsv, hsvToHex } from "./colorUtils"
+import {
+  COLORS,
+  DEFAULT_COLOR,
+  DEFAULT_WIDTH,
+  EDIT_TOOLS,
+  SHAPE_TOOLS,
+  STROKE_WIDTHS,
+  TOOLS,
+} from "./drawingConstants"
+
 const CANVAS_SIZE = 1200
 const CANVAS_WIDTH = CANVAS_SIZE
 const CANVAS_HEIGHT = CANVAS_SIZE
-
-const DEFAULT_COLOR = "#18181b"
-const DEFAULT_WIDTH = 6
-
-const COLORS = [
-  "#18181b",
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#22c55e",
-  "#06b6d4",
-  "#3b82f6",
-  "#8b5cf6",
-  "#ec4899",
-  "#ffffff",
-]
-
-const STROKE_WIDTHS = [
-  { label: "Thin", value: 3 },
-  { label: "Medium", value: 6 },
-  { label: "Thick", value: 12 },
-  { label: "Huge", value: 24 },
-]
+const MAX_CANVAS_PIXEL_RATIO = 1.5
 
 const LIVE_UPDATE_INTERVAL = 30
 const MIN_POINT_DISTANCE = 0.0015
 
 const FILL_TOLERANCE = 18
-const FILL_EDGE_TOLERANCE = 64
-
 const PEN_SIMPLIFY_TOLERANCE = 0.0018
 const PEN_MAX_POINTS = 450
 
-// Reference Pen behavior uses a 28px close distance on a 1200px canvas.
-const PEN_CLOSE_DISTANCE = 28 / CANVAS_SIZE
+function canvasPixelRatio() {
+  if (typeof window === "undefined") return 1
+
+  // The editor already renders into a 1200x1200 logical surface. Letting a
+  // 3x mobile display turn each of the three canvases into 3600x3600 buffers
+  // consumes well over 150 MB and makes Mobile Safari reload the page. A
+  // modest cap stays crisp while keeping the editor comfortably responsive.
+  return Math.min(window.devicePixelRatio || 1, MAX_CANVAS_PIXEL_RATIO)
+}
 
 function shouldSnapPenClosed(points) {
   // Pen strokes are shape-like freeform paths. Once the user has supplied
@@ -83,33 +78,6 @@ function snapPenClosed(points) {
 
 const ERASER_MIN_RADIUS = 0.012
 const ERASER_MAX_RADIUS = 0.12
-
-const TOOLS = {
-  SELECT: "select",
-  PENCIL: "pencil",
-  PEN: "pen",
-  LINE: "line",
-  CIRCLE: "circle",
-  SQUARE: "square",
-  TRIANGLE: "triangle",
-  ERASER: "eraser",
-  BUCKET: "bucket",
-  ANCHOR: "anchor",
-  CURVE: "curve",
-}
-
-const SHAPE_TOOLS = [
-  TOOLS.LINE,
-  TOOLS.CIRCLE,
-  TOOLS.SQUARE,
-  TOOLS.TRIANGLE,
-]
-
-const EDIT_TOOLS = [
-  TOOLS.SELECT,
-  TOOLS.ANCHOR,
-  TOOLS.CURVE,
-]
 
 /*
  * ---------------------------------------------------------------------------
@@ -143,44 +111,6 @@ function createStrokeId() {
   return `${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`
-}
-
-function hexToHsv(hex) {
-  const value = String(hex || "#18181b").replace("#", "")
-  if (!/^[0-9a-fA-F]{6}$/.test(value)) return { h: 0, s: 0, v: 0.0941 }
-  const r = parseInt(value.slice(0, 2), 16) / 255
-  const g = parseInt(value.slice(2, 4), 16) / 255
-  const b = parseInt(value.slice(4, 6), 16) / 255
-  const max = Math.max(r, g, b)
-  const min = Math.min(r, g, b)
-  const delta = max - min
-  let h = 0
-  if (delta) {
-    if (max === r) h = ((g - b) / delta) % 6
-    else if (max === g) h = (b - r) / delta + 2
-    else h = (r - g) / delta + 4
-    h *= 60
-    if (h < 0) h += 360
-  }
-  return { h, s: max === 0 ? 0 : delta / max, v: max }
-}
-
-function hsvToHex(h, s, v) {
-  const hue = ((Number(h) % 360) + 360) % 360
-  const saturation = clamp(Number(s) || 0, 0, 1)
-  const value = clamp(Number(v) || 0, 0, 1)
-  const c = value * saturation
-  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
-  const m = value - c
-  let r = 0, g = 0, b = 0
-  if (hue < 60) { r = c; g = x }
-  else if (hue < 120) { r = x; g = c }
-  else if (hue < 180) { g = c; b = x }
-  else if (hue < 240) { g = x; b = c }
-  else if (hue < 300) { r = x; b = c }
-  else { r = c; b = x }
-  const ch = (n) => Math.round((n + m) * 255).toString(16).padStart(2, "0")
-  return `#${ch(r)}${ch(g)}${ch(b)}`
 }
 
 function clonePoint(point) {
@@ -757,16 +687,42 @@ function erasePolyline(
     return []
   }
 
+  const sampledPoints = [clonePoint(points[0])]
+
+  for (let i = 1; i < points.length; i += 1) {
+    const start = points[i - 1]
+    const end = points[i]
+    const steps = Math.min(
+      100,
+      Math.max(1, Math.ceil(pointDistance(start, end) / Math.max(radius / 2, 0.001)))
+    )
+
+    for (let step = 1; step <= steps; step += 1) {
+      const ratio = step / steps
+      sampledPoints.push([
+        start[0] + (end[0] - start[0]) * ratio,
+        start[1] + (end[1] - start[1]) * ratio,
+      ])
+    }
+  }
+
+  // Round-trip payloads are capped at 5,000 points by the channel. Keep the
+  // local preview within the same limit so canonical reconciliation cannot
+  // subtly change a very long erased path.
+  const workingPoints =
+    sampledPoints.length > 5000
+      ? resamplePoints(sampledPoints, 5000)
+      : sampledPoints
   const survivingSegments = []
   let current = []
 
   for (
     let i = 0;
-    i < points.length;
+    i < workingPoints.length;
     i += 1
   ) {
     const point =
-      points[i]
+      workingPoints[i]
 
     const distance =
       pointDistance(
@@ -817,14 +773,15 @@ function convertShapeToPath(
     return null
   }
 
+  if (Array.isArray(operation.points) && operation.points.length >= 2) {
+    return clonePoints(operation.points)
+  }
+
   if (
     operation.shape ===
     "line"
   ) {
-    return [
-      operation.start,
-      operation.end,
-    ]
+    return [operation.start, operation.end].filter(Boolean).map(clonePoint)
   }
 
   if (
@@ -905,6 +862,27 @@ function convertShapeToPath(
   ]
 }
 
+function prepareEditableOperation(operation, pathMode = "linear") {
+  const editable = cloneOperation(operation)
+
+  if (editable.type === "shape") {
+    editable.type = "stroke"
+    editable.pen = false
+    editable.points = clonePoints(
+      Array.isArray(editable.points) && editable.points.length >= 2
+        ? editable.points
+        : convertShapeToPath(editable)
+    )
+    editable.closed = editable.shape !== "line"
+    editable.pathMode = pathMode
+    editable.bounds = calculateBoundsFromPoints(editable.points)
+  } else if (pathMode === "smooth") {
+    editable.pathMode = "smooth"
+  }
+
+  return editable
+}
+
 function eraseOperation(
   operation,
   eraserPoint,
@@ -943,7 +921,8 @@ function eraseOperation(
   if (
     Array.isArray(
       operation.points
-    )
+    ) &&
+    operation.type !== "shape"
   ) {
     const segments =
       erasePolyline(
@@ -1229,6 +1208,15 @@ function operationContainsPoint(
       operation.points
     )
   ) {
+    if (
+      operation.closed &&
+      operation.fill &&
+      operation.points.length >= 3 &&
+      pointInPolygon(point, operation.points)
+    ) {
+      return true
+    }
+
     const threshold =
       Math.max(
         0.012,
@@ -1316,7 +1304,11 @@ export default function GameCanvas({
   onLiveStroke,
   onUndo,
   onClear,
+  mobileViewport = false,
+  toolbarPlacement = "bottom",
 }) {
+  const toolbarOnRight =
+    mobileViewport && toolbarPlacement === "right"
   const [strokeColor, setStrokeColor] =
     useState(DEFAULT_COLOR)
 
@@ -1331,9 +1323,6 @@ export default function GameCanvas({
 
   const [pickerHue, setPickerHue] =
     useState(0)
-
-  const [recentColors, setRecentColors] =
-    useState(() => [...COLORS])
 
   const [strokeWidth, setStrokeWidth] =
     useState(DEFAULT_WIDTH)
@@ -1359,9 +1348,6 @@ export default function GameCanvas({
   const [showLayers, setShowLayers] =
     useState(false)
 
-  const [hiddenLayers, setHiddenLayers] =
-    useState(() => new Set())
-
   const canvasRef =
     useRef(null)
 
@@ -1371,6 +1357,41 @@ export default function GameCanvas({
   const liveCanvasRef =
     useRef(null)
 
+  const canvasViewportRef =
+    useRef(null)
+
+  const canvasStageRef =
+    useRef(null)
+
+  const stageSizeRef =
+    useRef(0)
+
+  const viewportPointersRef =
+    useRef(new Map())
+
+  const viewportGestureRef =
+    useRef(null)
+
+  const suppressTouchRef =
+    useRef(false)
+
+  const viewportTransformRef =
+    useRef({
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation: 0,
+    })
+
+  const editRenderFrameRef =
+    useRef(null)
+
+  const cursorFrameRef =
+    useRef(null)
+
+  const pendingCursorRef =
+    useRef(null)
+
   const drawingRef =
     useRef(false)
 
@@ -1378,6 +1399,12 @@ export default function GameCanvas({
     useRef(null)
 
   const currentShapeRef =
+    useRef(null)
+
+  const anchorPenRef =
+    useRef(null)
+
+  const anchorPenPointerRef =
     useRef(null)
 
   const pendingPointsRef =
@@ -1392,6 +1419,9 @@ export default function GameCanvas({
         ? strokes
         : []
     )
+
+  const activeRoundIdRef =
+    useRef(roundId)
 
   const localOperationsRef =
     useRef([])
@@ -1448,8 +1478,32 @@ export default function GameCanvas({
   const editRef =
     useRef(null)
 
-  const layersRef =
-    useRef([])
+  const eraseEditRef =
+    useRef(null)
+
+  useEffect(() => {
+    if (activeRoundIdRef.current === roundId) return
+
+    activeRoundIdRef.current = roundId
+    localOperationsRef.current = []
+    localVersionRef.current += 1
+    resolvedCacheRef.current.server = null
+    drawingRef.current = false
+    currentStrokeRef.current = null
+    currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
+    editRef.current = null
+    eraseEditRef.current = null
+    selectedOperationIdRef.current = null
+    selectedAnchorIndexRef.current = null
+    viewportPointersRef.current.clear()
+    viewportGestureRef.current = null
+    suppressTouchRef.current = false
+    resetViewportTransform()
+    setSelectedOperationId(null)
+    setSelectedAnchorIndex(null)
+  }, [roundId])
 
   useEffect(() => {
     strokesRef.current =
@@ -1577,6 +1631,93 @@ export default function GameCanvas({
   }, [])
 
   useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (
+        toolRef.current !== TOOLS.PEN ||
+        !anchorPenRef.current ||
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) {
+        return
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault()
+        finishAnchorPen(false)
+        return
+      }
+
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault()
+        const path = anchorPenRef.current
+        path.anchors.pop()
+
+        if (path.anchors.length === 0) {
+          onLiveStrokeRef.current?.({
+            type: "cancel",
+            stroke: { id: path.id },
+          })
+          anchorPenRef.current = null
+          currentStrokeRef.current = null
+          drawingRef.current = false
+        } else {
+          rebuildAnchorPenPoints(path)
+          sendAnchorPenSnapshot()
+        }
+
+        renderLiveCanvas()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (!mobileViewport) return
+
+    const viewport = canvasViewportRef.current
+    const stage = canvasStageRef.current
+
+    if (!viewport || !stage) return
+
+    const resizeStage = () => {
+      const size = Math.max(
+        160,
+        Math.min(
+          viewport.clientWidth - 24,
+          viewport.clientHeight - 24
+        )
+      )
+
+      stageSizeRef.current = size
+      stage.style.width = `${size}px`
+      stage.style.height = `${size}px`
+      stage.style.marginLeft = `${-size / 2}px`
+      stage.style.marginTop = `${-size / 2}px`
+      applyViewportTransform()
+    }
+
+    const observer = new ResizeObserver(resizeStage)
+    observer.observe(viewport)
+    resizeStage()
+
+    return () => observer.disconnect()
+  }, [mobileViewport])
+
+  useEffect(() => {
+    return () => {
+      if (editRenderFrameRef.current != null) {
+        cancelAnimationFrame(editRenderFrameRef.current)
+      }
+
+      if (cursorFrameRef.current != null) {
+        cancelAnimationFrame(cursorFrameRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     const canvas =
       canvasRef.current
 
@@ -1659,8 +1800,7 @@ export default function GameCanvas({
    */
 
   function getResolvedOperations() {
-    const cached =
-      resolvedCacheRef.current
+    const cached = resolvedCacheRef.current
 
     if (
       cached.server === strokesRef.current &&
@@ -1670,190 +1810,88 @@ export default function GameCanvas({
     }
 
     const result = []
+    const indexById = new Map()
 
-    const indexById =
-      new Map()
+    const rebuildIndex = () => {
+      indexById.clear()
+      result.forEach((item, index) => {
+        indexById.set(String(item.id), index)
+      })
+    }
 
-    const applyOperation =
-      (operation) => {
-        if (!operation) {
-          return
-        }
+    const applyOperation = (operation) => {
+      if (!operation) return
 
-        if (
-          operation.type ===
-          "layer_reorder"
-        ) {
-          const order =
-            Array.isArray(operation.order)
-              ? operation.order.map(String)
-              : []
-
-          if (order.length > 0) {
-            const rank = new Map(
-              order.map((id, position) => [
-                id,
-                position,
-              ])
-            )
-
-            result.sort((a, b) => {
-              const ar = rank.has(String(a.id))
-                ? rank.get(String(a.id))
-                : order.length + result.indexOf(a)
-
-              const br = rank.has(String(b.id))
-                ? rank.get(String(b.id))
-                : order.length + result.indexOf(b)
-
-              return ar - br
-            })
-
-            indexById.clear()
-            result.forEach((item, itemIndex) => {
-              if (item) {
-                indexById.set(item.id, itemIndex)
-              }
-            })
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_update"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index == null
-          ) {
-            return
-          }
-
-          result[index] = {
-            ...result[index],
-            ...cloneOperation(
-              operation.changes ||
-                {}
-            ),
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_delete"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index == null
-          ) {
-            return
-          }
-
-          result[index] = null
-          return
-        }
-
-        if (
-          operation.type ===
-          "layer_reorder"
-        ) {
-          const order =
-            Array.isArray(operation.order)
-              ? operation.order
-              : []
-
-          if (order.length > 0) {
-            const rank =
-              new Map(
-                order.map(
-                  (id, position) => [
-                    id,
-                    position,
-                  ]
-                )
-              )
-
-            result.sort(
-              (a, b) => {
-                const ar =
-                  rank.has(a.id)
-                    ? rank.get(a.id)
-                    : order.length + 100000 + result.indexOf(a)
-                const br =
-                  rank.has(b.id)
-                    ? rank.get(b.id)
-                    : order.length + 100000 + result.indexOf(b)
-                return ar - br
-              }
-            )
-
-            indexById.clear()
-            result.forEach(
-              (item, itemIndex) => {
-                if (item) {
-                  indexById.set(
-                    item.id,
-                    itemIndex
-                  )
-                }
-              }
-            )
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "object_restore"
-        ) {
-          const index =
-            indexById.get(
-              operation.objectId
-            )
-
-          if (
-            index != null
-          ) {
-            result[index] =
-              cloneOperation(
-                operation.object
-              )
-          }
-
-          return
-        }
-
-        if (
-          operation.type ===
-          "erase"
-        ) {
-          return
-        }
-
-        indexById.set(
-          operation.id,
-          result.length
-        )
-
-        result.push(
-          cloneOperation(
-            operation
-          )
-        )
+      if (operation.type === "canvas_clear") {
+        result.splice(0, result.length)
+        rebuildIndex()
+        return
       }
+
+      if (operation.type === "layer_reorder") {
+        const order = Array.isArray(operation.order)
+          ? operation.order.map(String)
+          : []
+
+        if (order.length > 0) {
+          const rank = new Map(
+            order.map((id, position) => [id, position])
+          )
+          const originalRank = new Map(
+            result.map((item, position) => [String(item.id), position])
+          )
+
+          result.sort((a, b) => {
+            const ar = rank.has(String(a.id))
+              ? rank.get(String(a.id))
+              : order.length + originalRank.get(String(a.id))
+            const br = rank.has(String(b.id))
+              ? rank.get(String(b.id))
+              : order.length + originalRank.get(String(b.id))
+            return ar - br
+          })
+          rebuildIndex()
+        }
+        return
+      }
+
+      if (operation.type === "object_update") {
+        const index = indexById.get(String(operation.objectId))
+        if (index == null) return
+
+        result[index] = {
+          ...result[index],
+          ...cloneOperation(operation.changes || {}),
+        }
+        return
+      }
+
+      if (operation.type === "object_delete") {
+        const index = indexById.get(String(operation.objectId))
+        if (index == null) return
+
+        result.splice(index, 1)
+        rebuildIndex()
+        return
+      }
+
+      if (operation.type === "erase") {
+        for (const change of operation.changes || []) {
+          const index = indexById.get(String(change.objectId))
+          if (index == null) continue
+
+          const after = Array.isArray(change.after)
+            ? change.after.map(cloneOperation).filter(Boolean)
+            : []
+          result.splice(index, 1, ...after)
+          rebuildIndex()
+        }
+        return
+      }
+
+      indexById.set(String(operation.id), result.length)
+      result.push(cloneOperation(operation))
+    }
 
     for (
       const operation of
@@ -1882,14 +1920,184 @@ export default function GameCanvas({
       }
     }
 
-    const resolved =
-      result.filter(Boolean)
-
     cached.server = strokesRef.current
     cached.localVersion = localVersionRef.current
-    cached.operations = resolved
+    cached.operations = result
 
-    return resolved
+    return result
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Mobile canvas viewport
+   * -------------------------------------------------------------------------
+   */
+
+  function applyViewportTransform() {
+    const stage = canvasStageRef.current
+    if (!stage) return
+
+    const transform = viewportTransformRef.current
+    stage.style.transform =
+      `translate3d(${transform.x}px, ${transform.y}px, 0) ` +
+      `rotate(${transform.rotation}deg) scale(${transform.scale})`
+  }
+
+  function resetViewportTransform() {
+    viewportTransformRef.current = {
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation: 0,
+    }
+    applyViewportTransform()
+  }
+
+  function cancelInteractionForViewportGesture() {
+    const liveId =
+      currentStrokeRef.current?.id ||
+      currentShapeRef.current?.id
+
+    if (liveId) {
+      onLiveStrokeRef.current?.({
+        type: "cancel",
+        stroke: { id: liveId },
+      })
+    }
+
+    drawingRef.current = false
+    currentStrokeRef.current = null
+    currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
+    pendingPointsRef.current = []
+    eraseEditRef.current = null
+    editRef.current = null
+    selectedAnchorIndexRef.current = null
+    setSelectedAnchorIndex(null)
+    renderCanvas()
+    renderLiveCanvas()
+    renderOverlay()
+  }
+
+  function handleViewportPointerDownCapture(event) {
+    if (!mobileViewport || event.pointerType !== "touch") return
+
+    viewportPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    })
+
+    if (viewportPointersRef.current.size < 2) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchRef.current = true
+    cancelInteractionForViewportGesture()
+
+    const points = [...viewportPointersRef.current.values()].slice(0, 2)
+    const [first, second] = points
+    const transform = viewportTransformRef.current
+
+    viewportGestureRef.current = {
+      midpoint: {
+        x: (first.x + second.x) / 2,
+        y: (first.y + second.y) / 2,
+      },
+      distance: Math.max(
+        1,
+        Math.hypot(second.x - first.x, second.y - first.y)
+      ),
+      angle: Math.atan2(second.y - first.y, second.x - first.x),
+      transform: { ...transform },
+    }
+  }
+
+  function handleViewportPointerMoveCapture(event) {
+    if (
+      !mobileViewport ||
+      event.pointerType !== "touch" ||
+      !viewportPointersRef.current.has(event.pointerId)
+    ) {
+      return
+    }
+
+    viewportPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    })
+
+    const gesture = viewportGestureRef.current
+    if (!gesture || viewportPointersRef.current.size < 2) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    const [first, second] =
+      [...viewportPointersRef.current.values()].slice(0, 2)
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    }
+    const distance = Math.max(
+      1,
+      Math.hypot(second.x - first.x, second.y - first.y)
+    )
+    const angle = Math.atan2(
+      second.y - first.y,
+      second.x - first.x
+    )
+
+    viewportTransformRef.current = {
+      x:
+        gesture.transform.x +
+        midpoint.x -
+        gesture.midpoint.x,
+      y:
+        gesture.transform.y +
+        midpoint.y -
+        gesture.midpoint.y,
+      scale: clamp(
+        gesture.transform.scale *
+          (distance / gesture.distance),
+        0.5,
+        4
+      ),
+      rotation:
+        gesture.transform.rotation +
+        ((angle - gesture.angle) * 180) / Math.PI,
+    }
+
+    applyViewportTransform()
+  }
+
+  function handleViewportPointerEndCapture(event) {
+    if (!mobileViewport || event.pointerType !== "touch") return
+
+    if (suppressTouchRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    viewportPointersRef.current.delete(event.pointerId)
+
+    if (viewportPointersRef.current.size < 2) {
+      viewportGestureRef.current = null
+    }
+
+    if (viewportPointersRef.current.size === 0) {
+      suppressTouchRef.current = false
+    }
+  }
+
+  function scheduleEditRender() {
+    if (editRenderFrameRef.current != null) return
+
+    editRenderFrameRef.current = requestAnimationFrame(() => {
+      editRenderFrameRef.current = null
+      renderLiveCanvas()
+      renderOverlay()
+    })
   }
 
   /*
@@ -1912,9 +2120,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     canvas.width =
       CANVAS_WIDTH * dpr
@@ -1961,6 +2167,44 @@ export default function GameCanvas({
     canvas,
     event
   ) {
+    if (
+      mobileViewport &&
+      canvasViewportRef.current &&
+      canvasStageRef.current
+    ) {
+      const viewportRect =
+        canvasViewportRef.current.getBoundingClientRect()
+      const transform = viewportTransformRef.current
+      const size =
+        stageSizeRef.current ||
+        canvasStageRef.current.offsetWidth
+      const centerX =
+        viewportRect.left +
+        viewportRect.width / 2 +
+        transform.x
+      const centerY =
+        viewportRect.top +
+        viewportRect.height / 2 +
+        transform.y
+      const radians =
+        (transform.rotation * Math.PI) / 180
+      const cosine = Math.cos(radians)
+      const sine = Math.sin(radians)
+      const screenX = event.clientX - centerX
+      const screenY = event.clientY - centerY
+      const localX =
+        (screenX * cosine + screenY * sine) /
+        transform.scale
+      const localY =
+        (-screenX * sine + screenY * cosine) /
+        transform.scale
+
+      return [
+        clamp(localX / size + 0.5, 0, 1),
+        clamp(localY / size + 0.5, 0, 1),
+      ]
+    }
+
     const rect =
       canvas.getBoundingClientRect()
 
@@ -2019,7 +2263,7 @@ export default function GameCanvas({
       return
     }
 
-    setCursorPosition({
+    pendingCursorRef.current = {
       x:
         event.clientX -
         rect.left,
@@ -2027,11 +2271,20 @@ export default function GameCanvas({
       y:
         event.clientY -
         rect.top,
+    }
+
+    if (cursorFrameRef.current != null) return
+
+    cursorFrameRef.current = requestAnimationFrame(() => {
+      cursorFrameRef.current = null
+      setCursorPosition(pendingCursorRef.current)
     })
   }
 
   const handleClear = () => {
     if (!canDraw) return
+
+    if (getResolvedOperations().length === 0) return
 
     // Clear local editing state
     selectedOperationIdRef.current = null
@@ -2044,6 +2297,8 @@ export default function GameCanvas({
     drawingRef.current = false
     currentStrokeRef.current = null
     currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
     editRef.current = null
 
     // Clear all canvases immediately
@@ -2059,12 +2314,160 @@ export default function GameCanvas({
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
     })
 
-    // Tell the game/server to clear the round's drawing.
-    onClearRef.current?.()
+    const operation = {
+      id: createStrokeId(),
+      type: "canvas_clear",
+    }
+
+    localOperationsRef.current.push(operation)
+    localVersionRef.current += 1
+
+    // Tell the game/server to append an undoable clear operation.
+    onClearRef.current?.(operation)
   }
 
   function handleCursorLeave() {
+    pendingCursorRef.current = null
     setCursorPosition(null)
+  }
+
+  function rebuildAnchorPenPoints(path) {
+    const points = []
+    const anchors = path?.anchors || []
+
+    for (let index = 0; index < anchors.length; index += 1) {
+      const anchor = anchors[index]
+      const previous = anchors[index - 1]
+
+      if (!previous) {
+        points.push(clonePoint(anchor.point))
+        continue
+      }
+
+      if (!anchor.smooth) {
+        points.push(clonePoint(anchor.point))
+        continue
+      }
+
+      const start = previous.point
+      const end = anchor.point
+      const control1 = previous.out || start
+      const control2 = anchor.input || end
+
+      for (let step = 1; step <= 16; step += 1) {
+        const t = step / 16
+        const inverse = 1 - t
+        points.push([
+          inverse ** 3 * start[0] +
+            3 * inverse ** 2 * t * control1[0] +
+            3 * inverse * t ** 2 * control2[0] +
+            t ** 3 * end[0],
+          inverse ** 3 * start[1] +
+            3 * inverse ** 2 * t * control1[1] +
+            3 * inverse * t ** 2 * control2[1] +
+            t ** 3 * end[1],
+        ])
+      }
+    }
+
+    path.points = points
+    path.bounds = calculateBoundsFromPoints(points)
+  }
+
+  function sendAnchorPenSnapshot(eventType = "points") {
+    const path = anchorPenRef.current
+    if (!path || typeof onLiveStrokeRef.current !== "function") return
+
+    onLiveStrokeRef.current({
+      type: eventType,
+      stroke: {
+        id: path.id,
+        type: "stroke",
+        points: clonePoints(path.points),
+        color: path.color,
+        width: path.width,
+        pen: true,
+        closed: path.closed,
+        fill: path.fill,
+        replace: true,
+      },
+    })
+  }
+
+  function finishAnchorPen(closed = false) {
+    const path = anchorPenRef.current
+    if (!path || path.anchors.length < 2) return
+
+    path.closed = closed
+    rebuildAnchorPenPoints(path)
+
+    if (closed) {
+      path.points.push(clonePoint(path.points[0]))
+      path.fill = fillColorRef.current
+    } else {
+      path.fill = null
+    }
+
+    path.bounds = calculateBoundsFromPoints(path.points)
+    sendAnchorPenSnapshot("points")
+
+    const operation = {
+      id: path.id,
+      type: "stroke",
+      points: clonePoints(path.points),
+      color: path.color,
+      width: path.width,
+      pen: true,
+      closed: path.closed,
+      fill: path.fill,
+      bounds: path.bounds,
+    }
+
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
+    currentStrokeRef.current = null
+    drawingRef.current = false
+    commitOperation(operation)
+  }
+
+  function handleAnchorPenDown(point, canvas, event) {
+    let path = anchorPenRef.current
+
+    if (
+      path &&
+      path.anchors.length >= 3 &&
+      pointDistance(point, path.anchors[0].point) <= 0.025
+    ) {
+      finishAnchorPen(true)
+      return
+    }
+
+    if (!path) {
+      path = {
+        id: createStrokeId(),
+        type: "stroke",
+        points: [],
+        anchors: [],
+        color: strokeColorRef.current,
+        width: strokeWidthRef.current,
+        pen: true,
+        closed: false,
+        fill: null,
+      }
+      anchorPenRef.current = path
+    }
+
+    path.anchors.push({ point: clonePoint(point), smooth: false })
+    rebuildAnchorPenPoints(path)
+    currentStrokeRef.current = path
+    drawingRef.current = true
+    anchorPenPointerRef.current = {
+      anchorIndex: path.anchors.length - 1,
+      start: clonePoint(point),
+    }
+    beginPointerCapture(canvas, event)
+    sendAnchorPenSnapshot(path.anchors.length === 1 ? "start" : "points")
+    renderLiveCanvas()
   }
 
   /*
@@ -2098,6 +2501,11 @@ export default function GameCanvas({
     const currentTool =
       toolRef.current
 
+    if (currentTool === TOOLS.PEN) {
+      handleAnchorPenDown(point, canvas, event)
+      return
+    }
+
     /*
      * SELECT
      */
@@ -2121,7 +2529,9 @@ export default function GameCanvas({
       currentTool ===
         TOOLS.ANCHOR ||
       currentTool ===
-        TOOLS.CURVE
+        TOOLS.CURVE ||
+      currentTool ===
+        TOOLS.ROTATE
     ) {
       handleEditDown(
         point,
@@ -2181,6 +2591,11 @@ export default function GameCanvas({
             ),
         }
 
+      eraseEditRef.current = {
+        operations: getResolvedOperations().map(cloneOperation),
+        changedRoots: new Set(),
+      }
+
       pendingPointsRef.current =
         [point]
 
@@ -2234,7 +2649,7 @@ export default function GameCanvas({
     }
 
     /*
-     * PENCIL / PEN / LINE
+     * PENCIL / FREEFORM
      */
 
     beginPointerCapture(
@@ -2244,7 +2659,7 @@ export default function GameCanvas({
 
     const type =
       currentTool ===
-      TOOLS.PEN
+      TOOLS.FREEFORM
         ? "stroke"
         : "stroke"
 
@@ -2256,7 +2671,7 @@ export default function GameCanvas({
 
       pen:
         currentTool ===
-        TOOLS.PEN,
+        TOOLS.FREEFORM,
 
       closed: false,
 
@@ -2268,7 +2683,7 @@ export default function GameCanvas({
         strokeColorRef.current,
 
       fill:
-        currentTool === TOOLS.PEN
+        currentTool === TOOLS.FREEFORM
           ? fillColorRef.current
           : null,
 
@@ -2353,6 +2768,44 @@ export default function GameCanvas({
 
     const currentTool =
       toolRef.current
+
+    if (
+      currentTool === TOOLS.PEN &&
+      anchorPenRef.current &&
+      anchorPenPointerRef.current
+    ) {
+      const pointer = anchorPenPointerRef.current
+      const anchor = anchorPenRef.current.anchors[pointer.anchorIndex]
+      const dx = point[0] - pointer.start[0]
+      const dy = point[1] - pointer.start[1]
+
+      if (anchor && Math.hypot(dx, dy) >= 0.002) {
+        anchor.smooth = true
+        anchor.input = [
+          clamp(pointer.start[0] - dx, 0, 1),
+          clamp(pointer.start[1] - dy, 0, 1),
+        ]
+        anchor.out = [
+          clamp(pointer.start[0] + dx, 0, 1),
+          clamp(pointer.start[1] + dy, 0, 1),
+        ]
+        rebuildAnchorPenPoints(anchorPenRef.current)
+        renderLiveCanvas()
+
+        const now = performance.now()
+        if (now - lastLiveUpdateRef.current >= LIVE_UPDATE_INTERVAL) {
+          sendAnchorPenSnapshot()
+          lastLiveUpdateRef.current = now
+        }
+      }
+      return
+    }
+
+    // A Pen path spans multiple clicks. Pointer movement between anchors is
+    // only a preview/cursor movement; it must never append freehand points.
+    if (currentTool === TOOLS.PEN && anchorPenRef.current) {
+      return
+    }
 
     /*
      * Shape preview.
@@ -2497,6 +2950,14 @@ export default function GameCanvas({
   function handlePointerUp(
     event
   ) {
+    if (toolRef.current === TOOLS.PEN && anchorPenRef.current) {
+      anchorPenPointerRef.current = null
+      releasePointerCapture(canvasRef.current, event)
+      sendAnchorPenSnapshot()
+      renderLiveCanvas()
+      return
+    }
+
     if (editRef.current) {
       event.preventDefault()
       finishEdit(event)
@@ -2594,7 +3055,35 @@ export default function GameCanvas({
       currentTool ===
       TOOLS.ERASER
     ) {
+      const eraseStroke = currentStrokeRef.current
+      const eraseEdit = eraseEditRef.current
+
+      if (eraseStroke && eraseEdit && eraseEdit.changedRoots.size > 0) {
+        const changes = [...eraseEdit.changedRoots].map((objectId) => ({
+          objectId,
+          after: eraseEdit.operations
+            .filter(
+              (operation) =>
+                (operation._eraseRootId || operation.id) === objectId
+            )
+            .map((operation) => {
+              const persisted = cloneOperation(operation)
+              delete persisted._eraseRootId
+              return persisted
+            }),
+        }))
+
+        commitOperation({
+          id: eraseStroke.id,
+          type: "erase",
+          changes,
+        })
+      }
+
       currentStrokeRef.current =
+        null
+
+      eraseEditRef.current =
         null
 
       pendingPointsRef.current =
@@ -2677,12 +3166,12 @@ export default function GameCanvas({
     }
 
     const completedPoints =
-      currentTool === TOOLS.PEN
+      currentTool === TOOLS.FREEFORM
         ? preparePenPoints(stroke.points)
         : clonePoints(stroke.points)
 
     const penClosed =
-      currentTool === TOOLS.PEN &&
+      currentTool === TOOLS.FREEFORM &&
       stroke.points.length >= 3
 
     const completedPenPoints =
@@ -2695,7 +3184,7 @@ export default function GameCanvas({
       points: completedPenPoints,
       closed: penClosed,
       fill:
-        currentTool === TOOLS.PEN && penClosed
+        currentTool === TOOLS.FREEFORM && penClosed
           ? (
               stroke.fill ||
               fillColorRef.current
@@ -2716,6 +3205,13 @@ export default function GameCanvas({
   function handlePointerCancel(
     event
   ) {
+    if (toolRef.current === TOOLS.PEN && anchorPenRef.current) {
+      anchorPenPointerRef.current = null
+      releasePointerCapture(canvasRef.current, event)
+      renderLiveCanvas()
+      return
+    }
+
     if (editRef.current) {
       editRef.current = null
       selectedAnchorIndexRef.current = null
@@ -2732,6 +3228,9 @@ export default function GameCanvas({
       null
 
     currentShapeRef.current =
+      null
+
+    eraseEditRef.current =
       null
 
     pendingPointsRef.current =
@@ -3016,8 +3515,7 @@ export default function GameCanvas({
     point,
     event
   ) {
-    const operations =
-      getResolvedOperations()
+    const operations = getResolvedOperations()
 
     let found = null
 
@@ -3031,9 +3529,7 @@ export default function GameCanvas({
         operations[i]
 
       if (
-        hiddenLayers.has(
-          operation.id
-        )
+        operation.hidden
       ) {
         continue
       }
@@ -3231,9 +3727,7 @@ export default function GameCanvas({
           operations[i]
 
         if (
-          hiddenLayers.has(
-            candidate.id
-          )
+          candidate.hidden
         ) {
           continue
         }
@@ -3275,6 +3769,11 @@ export default function GameCanvas({
     renderCanvas(operation.id)
     renderLiveCanvas()
 
+    const editableOperation = prepareEditableOperation(
+      operation,
+      currentTool === TOOLS.CURVE ? "smooth" : "linear"
+    )
+
     /*
      * Anchor editing works against actual points.
      *
@@ -3288,7 +3787,7 @@ export default function GameCanvas({
     ) {
       const index =
         findNearestPointIndex(
-          operation,
+          editableOperation,
           point
         )
 
@@ -3321,7 +3820,7 @@ export default function GameCanvas({
           clonePoint(point),
         changed: false,
         previewOperation:
-          cloneOperation(operation),
+          editableOperation,
       }
 
       beginCanvasEditCapture(event)
@@ -3340,7 +3839,7 @@ export default function GameCanvas({
     ) {
       const index =
         findNearestPointIndex(
-          operation,
+          editableOperation,
           point
         )
 
@@ -3370,12 +3869,36 @@ export default function GameCanvas({
           clonePoint(point),
         changed: false,
         previewOperation:
-          cloneOperation(operation),
+          editableOperation,
       }
 
       beginCanvasEditCapture(event)
 
       return
+    }
+
+    if (currentTool === TOOLS.ROTATE) {
+      const bounds = calculateOperationBounds(editableOperation)
+      if (!bounds || !Array.isArray(editableOperation.points)) return
+
+      const center = [
+        bounds.x + bounds.width / 2,
+        bounds.y + bounds.height / 2,
+      ]
+
+      editRef.current = {
+        type: "rotate",
+        operationId: operation.id,
+        center,
+        startAngle: Math.atan2(point[1] - center[1], point[0] - center[0]),
+        start: clonePoint(point),
+        last: clonePoint(point),
+        changed: false,
+        originalOperation: editableOperation,
+        previewOperation: editableOperation,
+      }
+
+      beginCanvasEditCapture(event)
     }
   }
 
@@ -3535,6 +4058,8 @@ export default function GameCanvas({
 
     if (Array.isArray(updated.points)) {
       updated.points = updated.points.map(movePoint)
+      if (updated.start) updated.start = movePoint(updated.start)
+      if (updated.end) updated.end = movePoint(updated.end)
       updated.bounds = calculateBoundsFromPoints(updated.points)
       return updated
     }
@@ -3622,9 +4147,37 @@ export default function GameCanvas({
       edit.deltaY =
         (edit.deltaY || 0) + dy
 
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
 
+      return
+    }
+
+    if (edit.type === "rotate") {
+      const original = edit.originalOperation
+      const center = edit.center
+
+      if (!original || !center || !Array.isArray(original.points)) {
+        return
+      }
+
+      const angle =
+        Math.atan2(point[1] - center[1], point[0] - center[0]) -
+        edit.startAngle
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+      const updated = cloneOperation(original)
+
+      updated.points = original.points.map(([x, y]) => {
+        const dxFromCenter = x - center[0]
+        const dyFromCenter = y - center[1]
+        return [
+          clamp(center[0] + dxFromCenter * cosine - dyFromCenter * sine, 0, 1),
+          clamp(center[1] + dxFromCenter * sine + dyFromCenter * cosine, 0, 1),
+        ]
+      })
+      updated.bounds = calculateBoundsFromPoints(updated.points)
+      edit.previewOperation = updated
+      scheduleEditRender()
       return
     }
 
@@ -3664,8 +4217,7 @@ export default function GameCanvas({
       }
 
       edit.previewOperation = updated
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
 
       return
     }
@@ -3753,25 +4305,9 @@ export default function GameCanvas({
         )
 
       edit.previewOperation = updated
-      renderLiveCanvas()
-      renderOverlay()
+      scheduleEditRender()
     }
   }
-
-  /*
-   * -------------------------------------------------------------------------
-   * Pointer move wrapper
-   * -------------------------------------------------------------------------
-   */
-
-  const originalHandlePointerMove =
-    handlePointerMove
-
-  /*
-   * The event listener installed in the effect above points at the function
-   * declared earlier, so we handle selection editing by routing through the
-   * editRef at the top-level handler.
-   */
 
   /*
    * -------------------------------------------------------------------------
@@ -3887,8 +4423,12 @@ export default function GameCanvas({
   function eraseAtPoint(
     point
   ) {
-    const operations =
-      getResolvedOperations()
+    const eraseEdit = eraseEditRef.current
+    const operations = eraseEdit?.operations
+
+    if (!eraseEdit || !Array.isArray(operations)) {
+      return
+    }
 
     const radius =
       clamp(
@@ -3917,9 +4457,7 @@ export default function GameCanvas({
         operations[i]
 
       if (
-        hiddenLayers.has(
-          operation.id
-        )
+        operation.hidden
       ) {
         continue
       }
@@ -4012,80 +4550,26 @@ export default function GameCanvas({
     original,
     result
   ) {
-    /*
-     * Delete the original object if nothing remains.
-     */
-    if (
-      result.deleted
-    ) {
-      emitObjectDelete(
-        original.id
-      )
+    const eraseEdit = eraseEditRef.current
+    if (!eraseEdit) return
 
-      return
-    }
-
-    /*
-     * Replace original geometry.
-     */
-    const replacement =
-      result.operation
-
-    updateLocalOperation(
-      original.id,
-      replacement
+    const index = eraseEdit.operations.findIndex(
+      (operation) => operation.id === original.id
     )
+    if (index < 0) return
 
-    const update = {
-      id:
-        createStrokeId(),
+    const rootId = original._eraseRootId || original.id
+    const replacements = result.deleted
+      ? []
+      : [result.operation, ...(result.additionalSegments || [])]
+          .filter(Boolean)
+          .map((operation) => ({
+            ...cloneOperation(operation),
+            _eraseRootId: rootId,
+          }))
 
-      type:
-        "object_update",
-
-      objectId:
-        original.id,
-
-      changes:
-        cloneOperation(
-          replacement
-        ),
-    }
-
-    localOperationsRef.current.push(
-      update
-    )
-
-    /*
-     * Additional surviving pieces become new layers.
-     */
-    for (
-      const additional of
-        result.additionalSegments ||
-        []
-    ) {
-      localOperationsRef.current.push(
-        additional
-      )
-
-      if (
-        typeof onStrokeRef.current ===
-        "function"
-      ) {
-        onStrokeRef.current(
-          additional
-        )
-      }
-    }
-
-    if (
-      typeof onStrokeRef.current ===
-      "function"
-    ) {
-      onStrokeRef.current(
-        update
-      )
-    }
+    eraseEdit.operations.splice(index, 1, ...replacements)
+    eraseEdit.changedRoots.add(rootId)
   }
 
   /*
@@ -4207,17 +4691,6 @@ export default function GameCanvas({
       hexToHsv(normalizedColor).h
     )
 
-    setRecentColors((current) =>
-      [
-        normalizedColor,
-        ...current.filter(
-          (color) =>
-            color.toLowerCase() !==
-            normalizedColor
-        ),
-      ].slice(0, 12)
-    )
-
     if (selectedOperationIdRef.current) {
       applyColorToSelection(
         target,
@@ -4249,15 +4722,6 @@ export default function GameCanvas({
 
   function handleCustomColorChange(event) {
     selectColor(event.target.value)
-  }
-
-  function handleHexColorChange(event) {
-    const value =
-      String(event.target.value || "").trim()
-
-    if (/^#[0-9a-fA-F]{6}$/.test(value)) {
-      selectColor(value)
-    }
   }
 
   function pickSaturationValue(event) {
@@ -4320,12 +4784,6 @@ export default function GameCanvas({
         hsv.v
       )
     )
-  }
-
-  function changeSelectedColor(
-    nextColor
-  ) {
-    selectColor(nextColor)
   }
 
   function changeSelectedWidth(
@@ -4453,11 +4911,13 @@ export default function GameCanvas({
       new Set([
         "stroke",
         "eraser",
+        "erase",
         "fill",
         "shape",
         "object_update",
         "object_delete",
         "layer_reorder",
+        "canvas_clear",
       ])
 
     let lastAction = null
@@ -4497,7 +4957,7 @@ export default function GameCanvas({
     for (let i = operations.length - 1; i >= 0; i -= 1) {
       const operation = operations[i]
 
-      if (!operation || hiddenLayers.has(operation.id)) {
+      if (!operation || operation.hidden) {
         continue
       }
 
@@ -4542,15 +5002,8 @@ export default function GameCanvas({
       return
     }
 
-    // Fallback for arbitrary closed raster regions.
-    const operation = {
-      id: createStrokeId(),
-      type: "fill",
-      point: clonePoint(point),
-      color,
-    }
-
-    commitOperation(operation)
+    // Fill is a vector object update. Clicking outside a closed vector object
+    // intentionally does nothing instead of creating a drawer-only raster fill.
   }
 
   /*
@@ -4574,9 +5027,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -4608,7 +5059,7 @@ export default function GameCanvas({
     )
 
     const operations =
-      getResolvedOperations()
+      eraseEditRef.current?.operations || getResolvedOperations()
 
     const edit = editRef.current
     const previewOperation =
@@ -4620,8 +5071,7 @@ export default function GameCanvas({
     ) {
       if (
         (
-          operation.hidden ||
-          hiddenLayers.has(operation.id)
+          operation.hidden
         ) ||
         operation.id === excludeOperationId
       ) {
@@ -4675,8 +5125,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio || 1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -4755,6 +5204,26 @@ export default function GameCanvas({
 
     if (drawingRef.current && stroke) {
       drawOperation(context, stroke, true)
+
+      if (anchorPenRef.current) {
+        const anchors = anchorPenRef.current.anchors
+        anchors.forEach((anchor, index) => {
+          context.beginPath()
+          context.arc(
+            anchor.point[0] * CANVAS_WIDTH,
+            anchor.point[1] * CANVAS_HEIGHT,
+            index === anchors.length - 1 ? 7 : 6,
+            0,
+            Math.PI * 2
+          )
+          context.fillStyle =
+            index === anchors.length - 1 ? "#ef4444" : "#ffffff"
+          context.fill()
+          context.strokeStyle = "#ef4444"
+          context.lineWidth = 3
+          context.stroke()
+        })
+      }
     }
 
     context.globalCompositeOperation =
@@ -5311,68 +5780,42 @@ export default function GameCanvas({
         CANVAS_HEIGHT
     )
 
-    for (
-      let i = 1;
-      i <
-        points.length - 1;
-      i += 1
-    ) {
-      const current =
-        points[i]
+    if (stroke.pathMode === "linear") {
+      for (let i = 1; i < points.length; i += 1) {
+        context.lineTo(
+          points[i][0] * CANVAS_WIDTH,
+          points[i][1] * CANVAS_HEIGHT
+        )
+      }
+    } else {
+      for (let i = 1; i < points.length - 1; i += 1) {
+        const current = points[i]
+        const next = points[i + 1]
 
-      const next =
-        points[i + 1]
+        context.quadraticCurveTo(
+          current[0] * CANVAS_WIDTH,
+          current[1] * CANVAS_HEIGHT,
+          ((current[0] + next[0]) / 2) * CANVAS_WIDTH,
+          ((current[1] + next[1]) / 2) * CANVAS_HEIGHT
+        )
+      }
 
-      const currentX =
-        current[0] *
-        CANVAS_WIDTH
-
-      const currentY =
-        current[1] *
-        CANVAS_HEIGHT
-
-      const nextX =
-        next[0] *
-        CANVAS_WIDTH
-
-      const nextY =
-        next[1] *
-        CANVAS_HEIGHT
+      const last = points[points.length - 1]
+      const previous = points[points.length - 2]
 
       context.quadraticCurveTo(
-        currentX,
-        currentY,
-        (
-          currentX +
-          nextX
-        ) / 2,
-        (
-          currentY +
-          nextY
-        ) / 2
+        previous[0] * CANVAS_WIDTH,
+        previous[1] * CANVAS_HEIGHT,
+        last[0] * CANVAS_WIDTH,
+        last[1] * CANVAS_HEIGHT
       )
     }
 
-    const last =
-      points[
-        points.length - 1
-      ]
-
-    const previous =
-      points[
-        points.length - 2
-      ]
-
-    context.quadraticCurveTo(
-      previous[0] *
-        CANVAS_WIDTH,
-      previous[1] *
-        CANVAS_HEIGHT,
-      last[0] *
-        CANVAS_WIDTH,
-      last[1] *
-        CANVAS_HEIGHT
-    )
+    if (stroke.closed && stroke.fill) {
+      context.closePath()
+      context.fillStyle = stroke.fill
+      context.fill()
+    }
 
     context.stroke()
 
@@ -5400,9 +5843,7 @@ export default function GameCanvas({
       return
     }
 
-    const dpr =
-      window.devicePixelRatio ||
-      1
+    const dpr = canvasPixelRatio()
 
     context.setTransform(
       dpr,
@@ -5554,16 +5995,6 @@ export default function GameCanvas({
     const nextHidden =
       !Boolean(operation.hidden)
 
-    setHiddenLayers((current) => {
-      const next = new Set(current)
-      if (nextHidden) {
-        next.add(operationId)
-      } else {
-        next.delete(operationId)
-      }
-      return next
-    })
-
     const update = {
       id: createStrokeId(),
       type: "object_update",
@@ -5679,6 +6110,20 @@ export default function GameCanvas({
   function chooseTool(
     nextTool
   ) {
+    if (toolRef.current === TOOLS.PEN && nextTool !== TOOLS.PEN) {
+      if ((anchorPenRef.current?.anchors.length || 0) >= 2) {
+        finishAnchorPen(false)
+      } else if (anchorPenRef.current) {
+        onLiveStrokeRef.current?.({
+          type: "cancel",
+          stroke: { id: anchorPenRef.current.id },
+        })
+        anchorPenRef.current = null
+        currentStrokeRef.current = null
+        drawingRef.current = false
+      }
+    }
+
     setTool(
       nextTool
     )
@@ -5694,6 +6139,10 @@ export default function GameCanvas({
       false
     )
 
+    setShowColorPicker(
+      false
+    )
+
     /*
      * Selection remains selected when switching between Select / Anchor /
      * Curve.
@@ -5704,7 +6153,9 @@ export default function GameCanvas({
       nextTool !==
         TOOLS.ANCHOR &&
       nextTool !==
-        TOOLS.CURVE
+        TOOLS.CURVE &&
+      nextTool !==
+        TOOLS.ROTATE
     ) {
       setSelectedAnchorIndex(
         null
@@ -5726,6 +6177,12 @@ export default function GameCanvas({
   function selectPen() {
     chooseTool(
       TOOLS.PEN
+    )
+  }
+
+  function selectFreeform() {
+    chooseTool(
+      TOOLS.FREEFORM
     )
   }
 
@@ -5783,58 +6240,9 @@ export default function GameCanvas({
     )
   }
 
-  /*
-   * -------------------------------------------------------------------------
-   * Pointer handler patch
-   * -------------------------------------------------------------------------
-   *
-   * The original handler above handles drawing. The edit state is checked
-   * first so Select / Anchor / Curve can drag without entering drawing mode.
-   */
-
-  function handlePointerMoveWithEditing(
-    event
-  ) {
-    if (
-      editRef.current
-    ) {
-      event.preventDefault()
-
-      const canvas =
-        canvasRef.current
-
-      if (!canvas) {
-        return
-      }
-
-      handleEditMove(
-        getNormalizedPoint(
-          canvas,
-          event
-        )
-      )
-
-      return
-    }
-
-    handlePointerMove(
-      event
-    )
-  }
-
-  function handlePointerUpWithEditing(
-    event
-  ) {
-    if (
-      editRef.current
-    ) {
-      event.preventDefault()
-      finishEdit(event)
-      return
-    }
-
-    handlePointerUp(
-      event
+  function selectRotate() {
+    chooseTool(
+      TOOLS.ROTATE
     )
   }
 
@@ -5856,14 +6264,14 @@ export default function GameCanvas({
     cursorPosition &&
     isDesktopPointer &&
     tool !== TOOLS.SELECT &&
-    tool !== TOOLS.ANCHOR &&
-    tool !== TOOLS.CURVE
+    !EDIT_TOOLS.includes(tool) &&
+    tool !== TOOLS.BUCKET
 
-  const showSelectCursor =
+  const showEditCursor =
     canDraw &&
     cursorPosition &&
     isDesktopPointer &&
-    tool === TOOLS.SELECT
+    (tool === TOOLS.SELECT || EDIT_TOOLS.includes(tool))
 
 
   const resolvedOperations =
@@ -5886,6 +6294,8 @@ export default function GameCanvas({
       ? "Anchor"
       : tool === TOOLS.CURVE
         ? "Curve"
+        : tool === TOOLS.ROTATE
+          ? "Rotate"
         : "Edit"
 
   /*
@@ -5895,10 +6305,26 @@ export default function GameCanvas({
    */
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl">
+    <div
+      className={
+        mobileViewport
+          ? `relative flex h-full min-h-0 overflow-hidden bg-zinc-800 ${
+              toolbarOnRight ? "flex-row" : "flex-col"
+            }`
+          : "relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl"
+      }
+    >
 
       {canDraw && (
-        <div className="border-b border-zinc-200 bg-zinc-100">
+        <div
+          className={
+            mobileViewport
+              ? toolbarOnRight
+                ? "order-2 h-full w-[300px] shrink-0 overflow-y-auto border-l border-zinc-300 bg-zinc-100 pt-[72px]"
+                : "order-2 shrink-0 border-t border-zinc-300 bg-zinc-100 pb-[env(safe-area-inset-bottom)]"
+              : "border-b border-zinc-200 bg-zinc-100"
+          }
+        >
 
           {/* --------------------------------------------------------------- */}
           {/* Selected-object contextual controls                             */}
@@ -5911,83 +6337,6 @@ export default function GameCanvas({
               <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
                 Selected
               </span>
-
-              {COLORS.map(
-                (nextColor) => (
-                  <button
-                    key={
-                      nextColor
-                    }
-                    type="button"
-                    onClick={() =>
-                      changeSelectedColor(
-                        nextColor
-                      )
-                    }
-                    className={`relative h-7 w-7 shrink-0 rounded-full border-2 ${
-                      selectedOperation.color ===
-                      nextColor
-                        ? "scale-110 border-zinc-900"
-                        : "border-transparent"
-                    }`}
-                    style={{
-                      backgroundColor:
-                        nextColor,
-                    }}
-                    aria-label={`Change selected object to ${nextColor}`}
-                  >
-                    {nextColor ===
-                      "#ffffff" && (
-                      <span className="absolute inset-0 rounded-full border border-zinc-300" />
-                    )}
-                  </button>
-                )
-              )}
-
-              <div className="mx-1 h-6 w-px bg-zinc-300" />
-
-              {STROKE_WIDTHS.map(
-                (option) => (
-                  <button
-                    key={
-                      option.value
-                    }
-                    type="button"
-                    onClick={() =>
-                      changeSelectedWidth(
-                        option.value
-                      )
-                    }
-                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                      Number(
-                        selectedOperation.width
-                      ) ===
-                      option.value
-                        ? "bg-zinc-900 text-white"
-                        : "bg-zinc-100 text-zinc-600"
-                    }`}
-                    aria-label={`Set selected width to ${option.label}`}
-                  >
-                    <span
-                      className="rounded-full bg-current"
-                      style={{
-                        width:
-                          Math.min(
-                            option.value,
-                            18
-                          ),
-                        height:
-                          Math.min(
-                            option.value,
-                            18
-                          ),
-                      }}
-                    />
-                  </button>
-                )
-              )}
-
-              <div className="mx-1 h-6 w-px bg-zinc-300" />
 
               <button
                 type="button"
@@ -6008,7 +6357,13 @@ export default function GameCanvas({
           {/* Main mobile toolbar                                             */}
           {/* --------------------------------------------------------------- */}
 
-          <div className="flex items-center gap-1 overflow-x-auto px-2 py-2">
+          <div
+            className={`flex items-center gap-1 px-2 py-2 ${
+              toolbarOnRight
+                ? "flex-wrap content-start overflow-y-auto"
+                : "overflow-x-auto"
+            }`}
+          >
 
             <button
               type="button"
@@ -6066,6 +6421,20 @@ export default function GameCanvas({
               <span className="hidden sm:inline">
                 Pen
               </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={selectFreeform}
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.FREEFORM
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+              aria-label="Freeform Pen"
+            >
+              <Waves size={17} />
+              <span className="hidden sm:inline">Freeform</span>
             </button>
 
             {/* Shape dropdown */}
@@ -6324,6 +6693,15 @@ export default function GameCanvas({
                     <Waves size={16} />
                     Curve
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={selectRotate}
+                    className="flex h-9 items-center gap-2 rounded-lg bg-zinc-50 px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    <RotateCcw size={16} />
+                    Rotate
+                  </button>
                 </div>
               )}
             </div>
@@ -6333,137 +6711,58 @@ export default function GameCanvas({
           {/* Compact stroke / fill color controls */}
 
           <div className="relative border-t border-zinc-200 bg-zinc-50">
-            <div className="flex items-center gap-2 overflow-x-auto px-3 py-2">
-              <div className="flex shrink-0 overflow-hidden rounded-lg border border-zinc-200 bg-white">
-                <button
-                  type="button"
-                  onClick={() => {
-                    selectColorTarget("stroke")
-                    setShowColorPicker(true)
-                  }}
-                  className={`flex h-8 items-center gap-1.5 px-2.5 text-[10px] font-bold uppercase ${
-                    colorTarget === "stroke"
-                      ? "bg-zinc-900 text-white"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span
-                    className="h-4 w-4 rounded-full border border-white/40"
-                    style={{ backgroundColor: strokeColor }}
-                  />
-                  Stroke
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    selectColorTarget("fill")
-                    setShowColorPicker(true)
-                  }}
-                  className={`flex h-8 items-center gap-1.5 border-l border-zinc-200 px-2.5 text-[10px] font-bold uppercase ${
-                    colorTarget === "fill"
-                      ? "bg-zinc-900 text-white"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span
-                    className="h-4 w-4 rounded border border-zinc-300"
-                    style={{ backgroundColor: fillColor }}
-                  />
-                  Fill
-                </button>
-              </div>
-
+            <div className="flex items-center gap-2 px-3 py-2">
               <button
                 type="button"
-                onClick={() =>
-                  setShowColorPicker((open) => !open)
-                }
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white"
-                aria-label="Open color picker"
+                onClick={() => setShowColorPicker((open) => !open)}
+                className="flex h-10 items-center gap-2 rounded-xl bg-zinc-900 px-3 text-xs font-semibold text-white"
+                aria-label="Open color and stroke panel"
               >
-                <span
-                  className="h-5 w-5 rounded-full border border-zinc-300"
-                  style={{
-                    backgroundColor:
-                      colorTarget === "fill"
-                        ? fillColor
-                        : strokeColor,
-                  }}
-                />
+                <Palette size={17} />
+                <span>Style</span>
               </button>
 
-              {recentColors.map((nextColor) => (
-                <button
-                  key={nextColor}
-                  type="button"
-                  onClick={() => selectColor(nextColor)}
-                  className={`h-7 w-7 shrink-0 rounded-full border-2 ${
-                    (
-                      colorTarget === "fill"
-                        ? fillColor
-                        : strokeColor
-                    ).toLowerCase() ===
-                    nextColor.toLowerCase()
-                      ? "scale-110 border-zinc-900"
-                      : "border-transparent"
-                  }`}
-                  style={{ backgroundColor: nextColor }}
-                  aria-label={`Set ${colorTarget} to ${nextColor}`}
-                />
-              ))}
-
-              <input
-                type="text"
-                defaultValue={
-                  colorTarget === "fill"
-                    ? fillColor
-                    : strokeColor
-                }
-                key={`${colorTarget}-${colorTarget === "fill" ? fillColor : strokeColor}`}
-                onChange={handleHexColorChange}
-                className="h-8 w-[78px] shrink-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-[11px] uppercase text-zinc-700 outline-none focus:border-zinc-400"
-                maxLength={7}
-                aria-label={`Hex ${colorTarget} color`}
-              />
-
-              <div className="mx-1 h-6 w-px shrink-0 bg-zinc-300" />
-
-              {STROKE_WIDTHS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() =>
-                    changeSelectedWidth(option.value)
-                  }
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                    strokeWidth === option.value
-                      ? "bg-zinc-900 text-white"
-                      : "bg-white text-zinc-600"
-                  }`}
-                  aria-label={option.label}
-                >
-                  <span
-                    className="rounded-full bg-current"
-                    style={{
-                      width: Math.min(option.value, 18),
-                      height: Math.min(option.value, 18),
-                    }}
-                  />
-                </button>
-              ))}
+              <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-zinc-500">
+                  <span className="h-4 w-4 rounded-full border border-zinc-300" style={{ backgroundColor: strokeColor }} />
+                  Stroke
+                </span>
+                <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-zinc-500">
+                  <span className="h-4 w-4 rounded border border-zinc-300" style={{ backgroundColor: fillColor }} />
+                  Fill
+                </span>
+                <span className="ml-auto text-[10px] font-bold text-zinc-600">
+                  {strokeWidth}px
+                </span>
+              </div>
             </div>
 
             {showColorPicker && (
-              <div className="absolute left-3 top-full z-[90] mt-1 w-[272px] overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl">
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
-                      {colorTarget === "fill" ? "Fill" : "Stroke"}
-                    </div>
-                    <div className="font-mono text-xs">
-                      {colorTarget === "fill" ? fillColor : strokeColor}
-                    </div>
+              <div
+                className={`absolute left-3 z-[90] max-h-[calc(100dvh-250px)] w-[272px] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl ${
+                  toolbarOnRight
+                    ? "right-full top-0 mr-2"
+                    : mobileViewport
+                      ? "bottom-full mb-1"
+                      : "top-full mt-1"
+                }`}
+              >
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex rounded-lg bg-white/5 p-1">
+                    {["stroke", "fill"].map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        onClick={() => selectColorTarget(target)}
+                        className={`rounded-md px-3 py-1.5 text-[10px] font-bold uppercase ${
+                          colorTarget === target
+                            ? "bg-white text-zinc-950"
+                            : "text-zinc-400"
+                        }`}
+                      >
+                        {target}
+                      </button>
+                    ))}
                   </div>
                   <button
                     type="button"
@@ -6595,6 +6894,52 @@ export default function GameCanvas({
                     />
                   </label>
                 </div>
+
+                <div className="mt-4 border-t border-white/10 pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
+                      Stroke width
+                    </span>
+                    <span className="font-mono text-xs text-white">
+                      {strokeWidth}px
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min="1"
+                    max="30"
+                    step="1"
+                    value={strokeWidth}
+                    onChange={(event) => changeSelectedWidth(Number(event.target.value))}
+                    className="mt-3 w-full accent-white"
+                    aria-label="Stroke width"
+                  />
+
+                  <div className="mt-2 grid grid-cols-4 gap-1.5">
+                    {STROKE_WIDTHS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => changeSelectedWidth(option.value)}
+                        className={`flex h-9 items-center justify-center rounded-lg ${
+                          strokeWidth === option.value
+                            ? "bg-white text-zinc-950"
+                            : "bg-white/5 text-zinc-300"
+                        }`}
+                        aria-label={`${option.label} stroke width`}
+                      >
+                        <span
+                          className="rounded-full bg-current"
+                          style={{
+                            width: Math.min(option.value, 18),
+                            height: Math.min(option.value, 18),
+                          }}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -6605,7 +6950,27 @@ export default function GameCanvas({
       {/* Canvas                                                             */}
       {/* ================================================================== */}
 
-      <div className="relative">
+      <div
+        ref={canvasViewportRef}
+        className={
+          mobileViewport
+            ? "relative order-1 min-h-0 flex-1 overflow-hidden bg-zinc-800"
+            : "relative"
+        }
+        style={{ touchAction: mobileViewport ? "none" : undefined }}
+        onPointerDownCapture={handleViewportPointerDownCapture}
+        onPointerMoveCapture={handleViewportPointerMoveCapture}
+        onPointerUpCapture={handleViewportPointerEndCapture}
+        onPointerCancelCapture={handleViewportPointerEndCapture}
+      >
+        <div
+          ref={canvasStageRef}
+          className={
+            mobileViewport
+              ? "absolute left-1/2 top-1/2 origin-center overflow-hidden border border-zinc-600 bg-white shadow-2xl will-change-transform"
+              : "relative"
+          }
+        >
 
         <canvas
           ref={canvasRef}
@@ -6624,7 +6989,7 @@ export default function GameCanvas({
             aspectRatio:
               `${CANVAS_WIDTH}/${CANVAS_HEIGHT}`,
             touchAction:
-              canDraw
+              canDraw || mobileViewport
                 ? "none"
                 : "auto",
           }}
@@ -6698,7 +7063,7 @@ export default function GameCanvas({
           />
         )}
 
-        {showSelectCursor && (
+        {showEditCursor && (
           <div
             className="pointer-events-none absolute z-30 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-900 bg-white/85 shadow-sm"
             style={{
@@ -6707,11 +7072,19 @@ export default function GameCanvas({
               transform: "translate(-50%, -50%)",
             }}
           >
-            <MousePointer2
-              size={15}
-              strokeWidth={2.25}
-              className="text-zinc-900"
-            />
+            {tool === TOOLS.ROTATE ? (
+              <RotateCcw size={15} className="text-zinc-900" />
+            ) : tool === TOOLS.ANCHOR ? (
+              <Anchor size={15} className="text-zinc-900" />
+            ) : tool === TOOLS.CURVE ? (
+              <Waves size={15} className="text-zinc-900" />
+            ) : (
+              <MousePointer2
+                size={15}
+                strokeWidth={2.25}
+                className="text-zinc-900"
+              />
+            )}
           </div>
         )}
 
@@ -6737,6 +7110,24 @@ export default function GameCanvas({
               />
             </div>
           )}
+        </div>
+
+        {mobileViewport && (
+          <>
+            <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-zinc-950/65 px-3 py-1.5 text-[10px] font-medium text-zinc-300 backdrop-blur-sm">
+              Two fingers to move, pinch, and rotate
+            </div>
+
+            <button
+              type="button"
+              onClick={resetViewportTransform}
+              className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-zinc-950/75 text-white shadow-lg backdrop-blur-sm active:scale-95"
+              aria-label="Reset canvas view"
+            >
+              <RotateCcw size={16} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* ================================================================== */}
@@ -6782,10 +7173,7 @@ export default function GameCanvas({
                     selectedOperationId
 
                   const hidden =
-                    Boolean(operation.hidden) ||
-                    hiddenLayers.has(
-                      operation.id
-                    )
+                    Boolean(operation.hidden)
 
                   const label =
                     operation.type ===
