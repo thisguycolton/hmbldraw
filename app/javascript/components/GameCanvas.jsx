@@ -7,6 +7,7 @@ import {
   EyeOff,
   Layers,
   PaintBucket,
+  Palette,
   Pencil,
   PenLine,
   RotateCcw,
@@ -1304,7 +1305,10 @@ export default function GameCanvas({
   onUndo,
   onClear,
   mobileViewport = false,
+  toolbarPlacement = "bottom",
 }) {
+  const toolbarOnRight =
+    mobileViewport && toolbarPlacement === "right"
   const [strokeColor, setStrokeColor] =
     useState(DEFAULT_COLOR)
 
@@ -1319,9 +1323,6 @@ export default function GameCanvas({
 
   const [pickerHue, setPickerHue] =
     useState(0)
-
-  const [recentColors, setRecentColors] =
-    useState(() => [...COLORS])
 
   const [strokeWidth, setStrokeWidth] =
     useState(DEFAULT_WIDTH)
@@ -1398,6 +1399,12 @@ export default function GameCanvas({
     useRef(null)
 
   const currentShapeRef =
+    useRef(null)
+
+  const anchorPenRef =
+    useRef(null)
+
+  const anchorPenPointerRef =
     useRef(null)
 
   const pendingPointsRef =
@@ -1484,6 +1491,8 @@ export default function GameCanvas({
     drawingRef.current = false
     currentStrokeRef.current = null
     currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
     editRef.current = null
     eraseEditRef.current = null
     selectedOperationIdRef.current = null
@@ -1619,6 +1628,49 @@ export default function GameCanvas({
         handleResize
       )
     }
+  }, [])
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (
+        toolRef.current !== TOOLS.PEN ||
+        !anchorPenRef.current ||
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) {
+        return
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault()
+        finishAnchorPen(false)
+        return
+      }
+
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault()
+        const path = anchorPenRef.current
+        path.anchors.pop()
+
+        if (path.anchors.length === 0) {
+          onLiveStrokeRef.current?.({
+            type: "cancel",
+            stroke: { id: path.id },
+          })
+          anchorPenRef.current = null
+          currentStrokeRef.current = null
+          drawingRef.current = false
+        } else {
+          rebuildAnchorPenPoints(path)
+          sendAnchorPenSnapshot()
+        }
+
+        renderLiveCanvas()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
   }, [])
 
   useEffect(() => {
@@ -1916,6 +1968,8 @@ export default function GameCanvas({
     drawingRef.current = false
     currentStrokeRef.current = null
     currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
     pendingPointsRef.current = []
     eraseEditRef.current = null
     editRef.current = null
@@ -2243,6 +2297,8 @@ export default function GameCanvas({
     drawingRef.current = false
     currentStrokeRef.current = null
     currentShapeRef.current = null
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
     editRef.current = null
 
     // Clear all canvases immediately
@@ -2275,6 +2331,145 @@ export default function GameCanvas({
     setCursorPosition(null)
   }
 
+  function rebuildAnchorPenPoints(path) {
+    const points = []
+    const anchors = path?.anchors || []
+
+    for (let index = 0; index < anchors.length; index += 1) {
+      const anchor = anchors[index]
+      const previous = anchors[index - 1]
+
+      if (!previous) {
+        points.push(clonePoint(anchor.point))
+        continue
+      }
+
+      if (!anchor.smooth) {
+        points.push(clonePoint(anchor.point))
+        continue
+      }
+
+      const start = previous.point
+      const end = anchor.point
+      const control1 = previous.out || start
+      const control2 = anchor.input || end
+
+      for (let step = 1; step <= 16; step += 1) {
+        const t = step / 16
+        const inverse = 1 - t
+        points.push([
+          inverse ** 3 * start[0] +
+            3 * inverse ** 2 * t * control1[0] +
+            3 * inverse * t ** 2 * control2[0] +
+            t ** 3 * end[0],
+          inverse ** 3 * start[1] +
+            3 * inverse ** 2 * t * control1[1] +
+            3 * inverse * t ** 2 * control2[1] +
+            t ** 3 * end[1],
+        ])
+      }
+    }
+
+    path.points = points
+    path.bounds = calculateBoundsFromPoints(points)
+  }
+
+  function sendAnchorPenSnapshot(eventType = "points") {
+    const path = anchorPenRef.current
+    if (!path || typeof onLiveStrokeRef.current !== "function") return
+
+    onLiveStrokeRef.current({
+      type: eventType,
+      stroke: {
+        id: path.id,
+        type: "stroke",
+        points: clonePoints(path.points),
+        color: path.color,
+        width: path.width,
+        pen: true,
+        closed: path.closed,
+        fill: path.fill,
+        replace: true,
+      },
+    })
+  }
+
+  function finishAnchorPen(closed = false) {
+    const path = anchorPenRef.current
+    if (!path || path.anchors.length < 2) return
+
+    path.closed = closed
+    rebuildAnchorPenPoints(path)
+
+    if (closed) {
+      path.points.push(clonePoint(path.points[0]))
+      path.fill = fillColorRef.current
+    } else {
+      path.fill = null
+    }
+
+    path.bounds = calculateBoundsFromPoints(path.points)
+    sendAnchorPenSnapshot("points")
+
+    const operation = {
+      id: path.id,
+      type: "stroke",
+      points: clonePoints(path.points),
+      color: path.color,
+      width: path.width,
+      pen: true,
+      closed: path.closed,
+      fill: path.fill,
+      bounds: path.bounds,
+    }
+
+    anchorPenRef.current = null
+    anchorPenPointerRef.current = null
+    currentStrokeRef.current = null
+    drawingRef.current = false
+    commitOperation(operation)
+  }
+
+  function handleAnchorPenDown(point, canvas, event) {
+    let path = anchorPenRef.current
+
+    if (
+      path &&
+      path.anchors.length >= 3 &&
+      pointDistance(point, path.anchors[0].point) <= 0.025
+    ) {
+      finishAnchorPen(true)
+      return
+    }
+
+    if (!path) {
+      path = {
+        id: createStrokeId(),
+        type: "stroke",
+        points: [],
+        anchors: [],
+        color: strokeColorRef.current,
+        width: strokeWidthRef.current,
+        pen: true,
+        closed: false,
+        fill: null,
+      }
+      anchorPenRef.current = path
+    }
+
+    path.anchors.push({ point: clonePoint(point), smooth: false })
+    rebuildAnchorPenPoints(path)
+    currentStrokeRef.current = path
+    drawingRef.current = true
+    anchorPenPointerRef.current = {
+      anchorIndex: path.anchors.length - 1,
+      start: clonePoint(point),
+    }
+    beginPointerCapture(canvas, event)
+    sendAnchorPenSnapshot(path.anchors.length === 1 ? "start" : "points")
+    renderLiveCanvas()
+  }
+
   /*
    * -------------------------------------------------------------------------
    * Pointer down
@@ -2305,6 +2500,11 @@ export default function GameCanvas({
 
     const currentTool =
       toolRef.current
+
+    if (currentTool === TOOLS.PEN) {
+      handleAnchorPenDown(point, canvas, event)
+      return
+    }
 
     /*
      * SELECT
@@ -2449,7 +2649,7 @@ export default function GameCanvas({
     }
 
     /*
-     * PENCIL / PEN / LINE
+     * PENCIL / FREEFORM
      */
 
     beginPointerCapture(
@@ -2459,7 +2659,7 @@ export default function GameCanvas({
 
     const type =
       currentTool ===
-      TOOLS.PEN
+      TOOLS.FREEFORM
         ? "stroke"
         : "stroke"
 
@@ -2471,7 +2671,7 @@ export default function GameCanvas({
 
       pen:
         currentTool ===
-        TOOLS.PEN,
+        TOOLS.FREEFORM,
 
       closed: false,
 
@@ -2483,7 +2683,7 @@ export default function GameCanvas({
         strokeColorRef.current,
 
       fill:
-        currentTool === TOOLS.PEN
+        currentTool === TOOLS.FREEFORM
           ? fillColorRef.current
           : null,
 
@@ -2568,6 +2768,44 @@ export default function GameCanvas({
 
     const currentTool =
       toolRef.current
+
+    if (
+      currentTool === TOOLS.PEN &&
+      anchorPenRef.current &&
+      anchorPenPointerRef.current
+    ) {
+      const pointer = anchorPenPointerRef.current
+      const anchor = anchorPenRef.current.anchors[pointer.anchorIndex]
+      const dx = point[0] - pointer.start[0]
+      const dy = point[1] - pointer.start[1]
+
+      if (anchor && Math.hypot(dx, dy) >= 0.002) {
+        anchor.smooth = true
+        anchor.input = [
+          clamp(pointer.start[0] - dx, 0, 1),
+          clamp(pointer.start[1] - dy, 0, 1),
+        ]
+        anchor.out = [
+          clamp(pointer.start[0] + dx, 0, 1),
+          clamp(pointer.start[1] + dy, 0, 1),
+        ]
+        rebuildAnchorPenPoints(anchorPenRef.current)
+        renderLiveCanvas()
+
+        const now = performance.now()
+        if (now - lastLiveUpdateRef.current >= LIVE_UPDATE_INTERVAL) {
+          sendAnchorPenSnapshot()
+          lastLiveUpdateRef.current = now
+        }
+      }
+      return
+    }
+
+    // A Pen path spans multiple clicks. Pointer movement between anchors is
+    // only a preview/cursor movement; it must never append freehand points.
+    if (currentTool === TOOLS.PEN && anchorPenRef.current) {
+      return
+    }
 
     /*
      * Shape preview.
@@ -2712,6 +2950,14 @@ export default function GameCanvas({
   function handlePointerUp(
     event
   ) {
+    if (toolRef.current === TOOLS.PEN && anchorPenRef.current) {
+      anchorPenPointerRef.current = null
+      releasePointerCapture(canvasRef.current, event)
+      sendAnchorPenSnapshot()
+      renderLiveCanvas()
+      return
+    }
+
     if (editRef.current) {
       event.preventDefault()
       finishEdit(event)
@@ -2920,12 +3166,12 @@ export default function GameCanvas({
     }
 
     const completedPoints =
-      currentTool === TOOLS.PEN
+      currentTool === TOOLS.FREEFORM
         ? preparePenPoints(stroke.points)
         : clonePoints(stroke.points)
 
     const penClosed =
-      currentTool === TOOLS.PEN &&
+      currentTool === TOOLS.FREEFORM &&
       stroke.points.length >= 3
 
     const completedPenPoints =
@@ -2938,7 +3184,7 @@ export default function GameCanvas({
       points: completedPenPoints,
       closed: penClosed,
       fill:
-        currentTool === TOOLS.PEN && penClosed
+        currentTool === TOOLS.FREEFORM && penClosed
           ? (
               stroke.fill ||
               fillColorRef.current
@@ -2959,6 +3205,13 @@ export default function GameCanvas({
   function handlePointerCancel(
     event
   ) {
+    if (toolRef.current === TOOLS.PEN && anchorPenRef.current) {
+      anchorPenPointerRef.current = null
+      releasePointerCapture(canvasRef.current, event)
+      renderLiveCanvas()
+      return
+    }
+
     if (editRef.current) {
       editRef.current = null
       selectedAnchorIndexRef.current = null
@@ -4438,17 +4691,6 @@ export default function GameCanvas({
       hexToHsv(normalizedColor).h
     )
 
-    setRecentColors((current) =>
-      [
-        normalizedColor,
-        ...current.filter(
-          (color) =>
-            color.toLowerCase() !==
-            normalizedColor
-        ),
-      ].slice(0, 12)
-    )
-
     if (selectedOperationIdRef.current) {
       applyColorToSelection(
         target,
@@ -4480,15 +4722,6 @@ export default function GameCanvas({
 
   function handleCustomColorChange(event) {
     selectColor(event.target.value)
-  }
-
-  function handleHexColorChange(event) {
-    const value =
-      String(event.target.value || "").trim()
-
-    if (/^#[0-9a-fA-F]{6}$/.test(value)) {
-      selectColor(value)
-    }
   }
 
   function pickSaturationValue(event) {
@@ -4551,12 +4784,6 @@ export default function GameCanvas({
         hsv.v
       )
     )
-  }
-
-  function changeSelectedColor(
-    nextColor
-  ) {
-    selectColor(nextColor)
   }
 
   function changeSelectedWidth(
@@ -4977,6 +5204,26 @@ export default function GameCanvas({
 
     if (drawingRef.current && stroke) {
       drawOperation(context, stroke, true)
+
+      if (anchorPenRef.current) {
+        const anchors = anchorPenRef.current.anchors
+        anchors.forEach((anchor, index) => {
+          context.beginPath()
+          context.arc(
+            anchor.point[0] * CANVAS_WIDTH,
+            anchor.point[1] * CANVAS_HEIGHT,
+            index === anchors.length - 1 ? 7 : 6,
+            0,
+            Math.PI * 2
+          )
+          context.fillStyle =
+            index === anchors.length - 1 ? "#ef4444" : "#ffffff"
+          context.fill()
+          context.strokeStyle = "#ef4444"
+          context.lineWidth = 3
+          context.stroke()
+        })
+      }
     }
 
     context.globalCompositeOperation =
@@ -5863,6 +6110,20 @@ export default function GameCanvas({
   function chooseTool(
     nextTool
   ) {
+    if (toolRef.current === TOOLS.PEN && nextTool !== TOOLS.PEN) {
+      if ((anchorPenRef.current?.anchors.length || 0) >= 2) {
+        finishAnchorPen(false)
+      } else if (anchorPenRef.current) {
+        onLiveStrokeRef.current?.({
+          type: "cancel",
+          stroke: { id: anchorPenRef.current.id },
+        })
+        anchorPenRef.current = null
+        currentStrokeRef.current = null
+        drawingRef.current = false
+      }
+    }
+
     setTool(
       nextTool
     )
@@ -5916,6 +6177,12 @@ export default function GameCanvas({
   function selectPen() {
     chooseTool(
       TOOLS.PEN
+    )
+  }
+
+  function selectFreeform() {
+    chooseTool(
+      TOOLS.FREEFORM
     )
   }
 
@@ -6041,7 +6308,9 @@ export default function GameCanvas({
     <div
       className={
         mobileViewport
-          ? "relative flex h-full min-h-0 flex-col overflow-hidden bg-zinc-800"
+          ? `relative flex h-full min-h-0 overflow-hidden bg-zinc-800 ${
+              toolbarOnRight ? "flex-row" : "flex-col"
+            }`
           : "relative overflow-hidden rounded-2xl border border-zinc-800 bg-white shadow-2xl"
       }
     >
@@ -6050,7 +6319,9 @@ export default function GameCanvas({
         <div
           className={
             mobileViewport
-              ? "order-2 shrink-0 border-t border-zinc-300 bg-zinc-100 pb-[env(safe-area-inset-bottom)]"
+              ? toolbarOnRight
+                ? "order-2 h-full w-[300px] shrink-0 overflow-y-auto border-l border-zinc-300 bg-zinc-100 pt-[72px]"
+                : "order-2 shrink-0 border-t border-zinc-300 bg-zinc-100 pb-[env(safe-area-inset-bottom)]"
               : "border-b border-zinc-200 bg-zinc-100"
           }
         >
@@ -6066,83 +6337,6 @@ export default function GameCanvas({
               <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
                 Selected
               </span>
-
-              {COLORS.map(
-                (nextColor) => (
-                  <button
-                    key={
-                      nextColor
-                    }
-                    type="button"
-                    onClick={() =>
-                      changeSelectedColor(
-                        nextColor
-                      )
-                    }
-                    className={`relative h-7 w-7 shrink-0 rounded-full border-2 ${
-                      selectedOperation.color ===
-                      nextColor
-                        ? "scale-110 border-zinc-900"
-                        : "border-transparent"
-                    }`}
-                    style={{
-                      backgroundColor:
-                        nextColor,
-                    }}
-                    aria-label={`Change selected object to ${nextColor}`}
-                  >
-                    {nextColor ===
-                      "#ffffff" && (
-                      <span className="absolute inset-0 rounded-full border border-zinc-300" />
-                    )}
-                  </button>
-                )
-              )}
-
-              <div className="mx-1 h-6 w-px bg-zinc-300" />
-
-              {STROKE_WIDTHS.map(
-                (option) => (
-                  <button
-                    key={
-                      option.value
-                    }
-                    type="button"
-                    onClick={() =>
-                      changeSelectedWidth(
-                        option.value
-                      )
-                    }
-                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                      Number(
-                        selectedOperation.width
-                      ) ===
-                      option.value
-                        ? "bg-zinc-900 text-white"
-                        : "bg-zinc-100 text-zinc-600"
-                    }`}
-                    aria-label={`Set selected width to ${option.label}`}
-                  >
-                    <span
-                      className="rounded-full bg-current"
-                      style={{
-                        width:
-                          Math.min(
-                            option.value,
-                            18
-                          ),
-                        height:
-                          Math.min(
-                            option.value,
-                            18
-                          ),
-                      }}
-                    />
-                  </button>
-                )
-              )}
-
-              <div className="mx-1 h-6 w-px bg-zinc-300" />
 
               <button
                 type="button"
@@ -6163,7 +6357,13 @@ export default function GameCanvas({
           {/* Main mobile toolbar                                             */}
           {/* --------------------------------------------------------------- */}
 
-          <div className="flex items-center gap-1 overflow-x-auto px-2 py-2">
+          <div
+            className={`flex items-center gap-1 px-2 py-2 ${
+              toolbarOnRight
+                ? "flex-wrap content-start overflow-y-auto"
+                : "overflow-x-auto"
+            }`}
+          >
 
             <button
               type="button"
@@ -6221,6 +6421,20 @@ export default function GameCanvas({
               <span className="hidden sm:inline">
                 Pen
               </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={selectFreeform}
+              className={`flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold ${
+                tool === TOOLS.FREEFORM
+                  ? "bg-zinc-900 text-white"
+                  : "bg-white text-zinc-700"
+              }`}
+              aria-label="Freeform Pen"
+            >
+              <Waves size={17} />
+              <span className="hidden sm:inline">Freeform</span>
             </button>
 
             {/* Shape dropdown */}
@@ -6497,141 +6711,58 @@ export default function GameCanvas({
           {/* Compact stroke / fill color controls */}
 
           <div className="relative border-t border-zinc-200 bg-zinc-50">
-            <div className="flex items-center gap-2 overflow-x-auto px-3 py-2">
-              <div className="flex shrink-0 overflow-hidden rounded-lg border border-zinc-200 bg-white">
-                <button
-                  type="button"
-                  onClick={() => {
-                    selectColorTarget("stroke")
-                    setShowColorPicker(true)
-                  }}
-                  className={`flex h-8 items-center gap-1.5 px-2.5 text-[10px] font-bold uppercase ${
-                    colorTarget === "stroke"
-                      ? "bg-zinc-900 text-white"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span
-                    className="h-4 w-4 rounded-full border border-white/40"
-                    style={{ backgroundColor: strokeColor }}
-                  />
-                  Stroke
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    selectColorTarget("fill")
-                    setShowColorPicker(true)
-                  }}
-                  className={`flex h-8 items-center gap-1.5 border-l border-zinc-200 px-2.5 text-[10px] font-bold uppercase ${
-                    colorTarget === "fill"
-                      ? "bg-zinc-900 text-white"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span
-                    className="h-4 w-4 rounded border border-zinc-300"
-                    style={{ backgroundColor: fillColor }}
-                  />
-                  Fill
-                </button>
-              </div>
-
+            <div className="flex items-center gap-2 px-3 py-2">
               <button
                 type="button"
-                onClick={() =>
-                  setShowColorPicker((open) => !open)
-                }
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white"
-                aria-label="Open color picker"
+                onClick={() => setShowColorPicker((open) => !open)}
+                className="flex h-10 items-center gap-2 rounded-xl bg-zinc-900 px-3 text-xs font-semibold text-white"
+                aria-label="Open color and stroke panel"
               >
-                <span
-                  className="h-5 w-5 rounded-full border border-zinc-300"
-                  style={{
-                    backgroundColor:
-                      colorTarget === "fill"
-                        ? fillColor
-                        : strokeColor,
-                  }}
-                />
+                <Palette size={17} />
+                <span>Style</span>
               </button>
 
-              {recentColors.map((nextColor) => (
-                <button
-                  key={nextColor}
-                  type="button"
-                  onClick={() => selectColor(nextColor)}
-                  className={`h-7 w-7 shrink-0 rounded-full border-2 ${
-                    (
-                      colorTarget === "fill"
-                        ? fillColor
-                        : strokeColor
-                    ).toLowerCase() ===
-                    nextColor.toLowerCase()
-                      ? "scale-110 border-zinc-900"
-                      : "border-transparent"
-                  }`}
-                  style={{ backgroundColor: nextColor }}
-                  aria-label={`Set ${colorTarget} to ${nextColor}`}
-                />
-              ))}
-
-              <input
-                type="text"
-                defaultValue={
-                  colorTarget === "fill"
-                    ? fillColor
-                    : strokeColor
-                }
-                key={`${colorTarget}-${colorTarget === "fill" ? fillColor : strokeColor}`}
-                onChange={handleHexColorChange}
-                className="h-8 w-[78px] shrink-0 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-[11px] uppercase text-zinc-700 outline-none focus:border-zinc-400"
-                maxLength={7}
-                aria-label={`Hex ${colorTarget} color`}
-              />
-
-              <div className="mx-1 h-6 w-px shrink-0 bg-zinc-300" />
-
-              {STROKE_WIDTHS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() =>
-                    changeSelectedWidth(option.value)
-                  }
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-                    strokeWidth === option.value
-                      ? "bg-zinc-900 text-white"
-                      : "bg-white text-zinc-600"
-                  }`}
-                  aria-label={option.label}
-                >
-                  <span
-                    className="rounded-full bg-current"
-                    style={{
-                      width: Math.min(option.value, 18),
-                      height: Math.min(option.value, 18),
-                    }}
-                  />
-                </button>
-              ))}
+              <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-zinc-500">
+                  <span className="h-4 w-4 rounded-full border border-zinc-300" style={{ backgroundColor: strokeColor }} />
+                  Stroke
+                </span>
+                <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-zinc-500">
+                  <span className="h-4 w-4 rounded border border-zinc-300" style={{ backgroundColor: fillColor }} />
+                  Fill
+                </span>
+                <span className="ml-auto text-[10px] font-bold text-zinc-600">
+                  {strokeWidth}px
+                </span>
+              </div>
             </div>
 
             {showColorPicker && (
               <div
                 className={`absolute left-3 z-[90] max-h-[calc(100dvh-250px)] w-[272px] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl ${
-                  mobileViewport ? "bottom-full mb-1" : "top-full mt-1"
+                  toolbarOnRight
+                    ? "right-full top-0 mr-2"
+                    : mobileViewport
+                      ? "bottom-full mb-1"
+                      : "top-full mt-1"
                 }`}
               >
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
-                      {colorTarget === "fill" ? "Fill" : "Stroke"}
-                    </div>
-                    <div className="font-mono text-xs">
-                      {colorTarget === "fill" ? fillColor : strokeColor}
-                    </div>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex rounded-lg bg-white/5 p-1">
+                    {["stroke", "fill"].map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        onClick={() => selectColorTarget(target)}
+                        className={`rounded-md px-3 py-1.5 text-[10px] font-bold uppercase ${
+                          colorTarget === target
+                            ? "bg-white text-zinc-950"
+                            : "text-zinc-400"
+                        }`}
+                      >
+                        {target}
+                      </button>
+                    ))}
                   </div>
                   <button
                     type="button"
@@ -6762,6 +6893,52 @@ export default function GameCanvas({
                       aria-label={`Native ${colorTarget} picker`}
                     />
                   </label>
+                </div>
+
+                <div className="mt-4 border-t border-white/10 pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
+                      Stroke width
+                    </span>
+                    <span className="font-mono text-xs text-white">
+                      {strokeWidth}px
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min="1"
+                    max="30"
+                    step="1"
+                    value={strokeWidth}
+                    onChange={(event) => changeSelectedWidth(Number(event.target.value))}
+                    className="mt-3 w-full accent-white"
+                    aria-label="Stroke width"
+                  />
+
+                  <div className="mt-2 grid grid-cols-4 gap-1.5">
+                    {STROKE_WIDTHS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => changeSelectedWidth(option.value)}
+                        className={`flex h-9 items-center justify-center rounded-lg ${
+                          strokeWidth === option.value
+                            ? "bg-white text-zinc-950"
+                            : "bg-white/5 text-zinc-300"
+                        }`}
+                        aria-label={`${option.label} stroke width`}
+                      >
+                        <span
+                          className="rounded-full bg-current"
+                          style={{
+                            width: Math.min(option.value, 18),
+                            height: Math.min(option.value, 18),
+                          }}
+                        />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}

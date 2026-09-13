@@ -39,17 +39,34 @@ const CATEGORY_ICONS = {
 }
 
 function subscribeToMobileLayout(notify) {
-  const media = window.matchMedia("(max-width: 767px)")
+  const media = window.matchMedia("(hover: none) and (pointer: coarse)")
   media.addEventListener("change", notify)
   return () => media.removeEventListener("change", notify)
 }
 
 function getMobileLayoutSnapshot() {
-  return window.matchMedia("(max-width: 767px)").matches
+  return (
+    navigator.maxTouchPoints > 0 ||
+    window.matchMedia("(hover: none) and (pointer: coarse)").matches
+  )
 }
 
 function getServerMobileLayoutSnapshot() {
   return false
+}
+
+function subscribeToLandscapeLayout(notify) {
+  const media = window.matchMedia(
+    "(orientation: landscape) and (min-width: 768px)"
+  )
+  media.addEventListener("change", notify)
+  return () => media.removeEventListener("change", notify)
+}
+
+function getLandscapeLayoutSnapshot() {
+  return window.matchMedia(
+    "(orientation: landscape) and (min-width: 768px)"
+  ).matches
 }
 
 function CategoryIcon({ slug, className = "h-5 w-5" }) {
@@ -283,6 +300,11 @@ export default function Show({
   const mobileDrawingLayout = useSyncExternalStore(
     subscribeToMobileLayout,
     getMobileLayoutSnapshot,
+    getServerMobileLayoutSnapshot
+  )
+  const touchLandscapeLayout = useSyncExternalStore(
+    subscribeToLandscapeLayout,
+    getLandscapeLayoutSnapshot,
     getServerMobileLayoutSnapshot
   )
 
@@ -800,6 +822,14 @@ useEffect(() => {
             return
           }
 
+          if (data.round?.started_at) {
+            setCurrentRound((current) => ({
+              ...current,
+              started_at: data.round.started_at,
+              duration: data.round.duration,
+            }))
+          }
+
           setLiveStrokes((current) => ({
             ...current,
             [stroke.id]: stroke,
@@ -833,6 +863,13 @@ useEffect(() => {
             const existing = current[incoming.id]
 
             if (!existing) {
+              return {
+                ...current,
+                [incoming.id]: incoming,
+              }
+            }
+
+            if (incoming.replace) {
               return {
                 ...current,
                 [incoming.id]: incoming,
@@ -1623,7 +1660,8 @@ function sendLiveStroke(data) {
     subscriptionRef.current.perform(
       "clear_canvas",
       {
-        ...operation,
+        id: operation.id,
+        type: "canvas_clear",
         round_id: currentRoundRef.current.id,
       }
     )
@@ -2169,7 +2207,7 @@ return (
         {/* ============================================================= */}
 
         {mobileDrawingLayout === true && (
-        <section className="fixed inset-0 z-50 overflow-hidden bg-zinc-950 md:hidden">
+        <section className="fixed inset-0 z-50 overflow-hidden bg-zinc-950">
           <div
             className="relative h-[100dvh] w-full overflow-hidden overscroll-none"
             style={{
@@ -2184,7 +2222,9 @@ return (
             <div
               className="absolute inset-x-0 bottom-0 overflow-hidden bg-zinc-800"
               style={{
-                top: "calc(env(safe-area-inset-top) + 72px)",
+                top: touchLandscapeLayout
+                  ? "0"
+                  : "calc(env(safe-area-inset-top) + 72px)",
               }}
             >
               <div className="drawing-canvas-shell absolute inset-0 overflow-hidden">
@@ -2194,14 +2234,14 @@ return (
                   liveStrokes={liveStrokes}
                   canDraw={
                     isDrawer &&
-                    timeLeft !== null &&
-                    timeLeft > 0
+                    (timeLeft === null || timeLeft > 0)
                   }
                   onStroke={drawStroke}
                   onLiveStroke={sendLiveStroke}
                   onUndo={undoStroke}
                   onClear={clearCanvas}
                   mobileViewport
+                  toolbarPlacement={touchLandscapeLayout ? "right" : "bottom"}
                 />
               </div>
             </div>
@@ -2211,8 +2251,12 @@ return (
             {/* ========================================================= */}
 
             <header
-              className="absolute inset-x-0 top-0 z-[70] h-[calc(env(safe-area-inset-top)+72px)] border-b border-white/10 bg-zinc-950 text-white shadow-lg"
-              style={{ paddingTop: "env(safe-area-inset-top)" }}
+              className={
+                touchLandscapeLayout
+                  ? "absolute right-0 top-0 z-[70] w-[300px] border-b border-white/10 bg-zinc-950 text-white shadow-lg"
+                  : "absolute inset-x-0 top-0 z-[70] h-[calc(env(safe-area-inset-top)+72px)] border-b border-white/10 bg-zinc-950 text-white shadow-lg"
+              }
+              style={{ paddingTop: touchLandscapeLayout ? 0 : "env(safe-area-inset-top)" }}
             >
               <div className="grid h-[72px] grid-cols-[minmax(0,1fr)_minmax(120px,1.35fr)_auto] items-center gap-2 px-3">
                 <div className="min-w-0">
@@ -2280,17 +2324,20 @@ return (
                     )}
                   </button>
 
-                  {timeLeft !== null && (
-                    <div
-                      className={`flex h-10 min-w-12 items-center justify-center rounded-xl px-2 font-mono text-lg font-bold ${
-                        timeLeft <= 10
-                          ? "bg-red-950 text-red-400"
-                          : "bg-zinc-900 text-white"
-                      }`}
-                    >
-                      {timeLeft}
-                    </div>
-                  )}
+                  <div
+                    className={`flex h-10 min-w-12 items-center justify-center rounded-xl px-2 font-mono text-lg font-bold ${
+                      timeLeft !== null && timeLeft <= 10
+                        ? "bg-red-950 text-red-400"
+                        : "bg-zinc-900 text-white"
+                    }`}
+                    aria-label={
+                      timeLeft === null
+                        ? "Timer starts with the first stroke"
+                        : `${timeLeft} seconds remaining`
+                    }
+                  >
+                    {timeLeft ?? game_room.round_duration}
+                  </div>
                 </div>
               </div>
             </header>
@@ -2394,7 +2441,7 @@ return (
       {/* ============================================================= */}
 
       {mobileDrawingLayout === false && (
-      <div className="hidden md:block">
+      <div>
         <GameWorkspace
           aside={
             <>
@@ -2575,8 +2622,7 @@ return (
               liveStrokes={liveStrokes}
               canDraw={
                 isDrawer &&
-                timeLeft !== null &&
-                timeLeft > 0
+                (timeLeft === null || timeLeft > 0)
               }
               onStroke={drawStroke}
               onLiveStroke={sendLiveStroke}

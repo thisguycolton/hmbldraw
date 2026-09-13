@@ -220,6 +220,11 @@ def draw_live(data)
 
   case payload[:type]
   when "start"
+    round = GameRoomGame.start_drawing_timer!(
+      @game_room,
+      @player
+    ) if round.started_at.nil?
+
     GameRoomBroadcaster.stroke_started(
       @game_room,
       round,
@@ -357,7 +362,15 @@ def draw_stroke(data)
   # Persist the operation
   # --------------------------------------------------------------------------
 
-  return unless active_editor_round!(data)
+  active_round = active_editor_round!(data)
+  return unless active_round
+
+  if active_round.started_at.nil?
+    GameRoomGame.start_drawing_timer!(
+      @game_room,
+      @player
+    )
+  end
 
   round =
     GameRoomGame.draw_stroke!(
@@ -739,6 +752,8 @@ end
     refresh: !cached
   )
 
+  return round unless round.started_at
+
   deadline =
     round.started_at +
     @game_room.round_duration.seconds
@@ -935,7 +950,7 @@ def sync_current_game_state
             id: round.drawer.id,
             name: round.drawer.name
           },
-          started_at: round.started_at.iso8601,
+          started_at: round.started_at&.iso8601,
           duration: @game_room.round_duration,
           strokes: Array(round.strokes),
           guesses: round.guesses.includes(:player).order(:created_at).map do |guess|
@@ -1205,6 +1220,7 @@ end
       width: width,
       pen: !!raw_stroke["pen"],
       closed: !!raw_stroke["closed"],
+      replace: !!raw_stroke["replace"],
       fill: (raw_stroke["fill"].to_s.match?(/\A#[0-9a-fA-F]{6}\z/) ? raw_stroke["fill"].to_s : nil)
     }
   }
@@ -1238,9 +1254,10 @@ end
 
   def sanitize_canvas_clear(data)
     data = data.to_h.stringify_keys
-    id = data["id"].to_s.first(100)
-
-    raise GameRoomGame::Error, "Invalid clear operation ID." if id.blank?
+    nested = data["operation"].is_a?(Hash) ? data["operation"].stringify_keys : {}
+    id = (data["id"].presence || nested["id"].presence || SecureRandom.uuid)
+      .to_s
+      .first(100)
 
     {
       id: id,

@@ -140,6 +140,7 @@ export default function DrawingToolbar({
         <ToolButton active={tool === TOOLS.SELECT} onClick={() => choose(TOOLS.SELECT)} label="Select" icon={<MousePointer2 size={17} />} />
         <ToolButton active={tool === TOOLS.PENCIL} onClick={() => choose(TOOLS.PENCIL)} label="Pencil" icon={<Pencil size={17} />} />
         <ToolButton active={tool === TOOLS.PEN} onClick={() => choose(TOOLS.PEN)} label="Pen" icon={<PenLine size={17} />} />
+        <ToolButton active={tool === TOOLS.FREEFORM} onClick={() => choose(TOOLS.FREEFORM)} label="Freeform" icon={<Waves size={17} />} />
 
         <div className="relative shrink-0">
           <ToolButton

@@ -111,6 +111,47 @@ class GameRoomChannelTest < ActionCable::Channel::TestCase
     end
   end
 
+  test "the first live stroke starts the drawing countdown" do
+    round = create_round(started_at: nil)
+    subscribe(code: @game_room.code, player_token: @token)
+
+    perform :draw_live, {
+      round_id: round.id,
+      type: "start",
+      stroke: {
+        "id" => "first-stroke",
+        "type" => "stroke",
+        "points" => [[0.1, 0.1]],
+        "color" => "#18181b",
+        "width" => 6
+      }
+    }
+
+    assert_predicate round.reload.started_at, :present?
+  end
+
+  test "clear canvas assigns a canonical id when the client id is missing" do
+    round = create_round(started_at: Time.current)
+    round.update!(strokes: [
+      {
+        "id" => "stroke-1",
+        "type" => "stroke",
+        "points" => [[0.1, 0.1], [0.2, 0.2]],
+        "color" => "#18181b",
+        "width" => 6
+      }
+    ])
+    subscribe(code: @game_room.code, player_token: @token)
+
+    assert_broadcasts("game_room:#{@game_room.id}", 1) do
+      perform :clear_canvas, { round_id: round.id, type: "canvas_clear" }
+    end
+
+    clear = round.reload.strokes.last
+    assert_equal "canvas_clear", clear.fetch("type")
+    assert_predicate clear.fetch("id"), :present?
+  end
+
   test "drawing reconnect includes existing guesses in chronological order" do
     round = create_round(started_at: Time.current)
     guesser = @game_room.players.create!(

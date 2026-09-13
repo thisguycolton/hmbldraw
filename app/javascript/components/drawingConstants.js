@@ -2,6 +2,7 @@ export const TOOLS = {
   SELECT: "select",
   PENCIL: "pencil",
   PEN: "pen",
+  FREEFORM: "freeform",
   LINE: "line",
   CIRCLE: "circle",
   SQUARE: "square",

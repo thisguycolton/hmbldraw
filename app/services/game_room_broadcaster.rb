@@ -132,7 +132,7 @@ def self.round_started(game_room, round)
           id: round.drawer.id,
           name: round.drawer.name
         },
-        started_at: round.started_at.iso8601,
+        started_at: round.started_at&.iso8601,
         duration: game_room.round_duration,
         strokes: Array(round.strokes),
         guesses: round.guesses.includes(:player).order(:created_at).map do |guess|
@@ -159,7 +159,9 @@ def self.stroke_started(game_room, round, stroke)
       type: "stroke_started",
       round: {
         id: round.id,
-        number: round.number
+        number: round.number,
+        started_at: round.started_at&.iso8601,
+        duration: game_room.round_duration
       },
       stroke: stroke
     }

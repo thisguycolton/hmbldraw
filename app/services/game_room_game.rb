@@ -22,6 +22,10 @@ class GameRoomGame
     new(game_room, player).draw_stroke!(stroke)
   end
 
+  def self.start_drawing_timer!(game_room, player)
+    new(game_room, player).start_drawing_timer!
+  end
+
   def self.update_object!(game_room, player, operation)
     new(game_room, player).update_object!(operation)
   end
@@ -272,7 +276,7 @@ end
       if all_ready
         round.update!(
           status: "drawing",
-          started_at: Time.current
+          started_at: nil
         )
 
         @game_room.update!(
@@ -301,13 +305,6 @@ end
         round
       )
 
-      RoundTimeoutJob
-        .set(
-          wait_until:
-            round.started_at +
-            @game_room.round_duration.seconds
-        )
-        .perform_later(round.id)
     end
 
     round
@@ -744,6 +741,36 @@ end
 # ------------------------------------------------------------------------------
 # Drawing
 # ------------------------------------------------------------------------------
+
+def start_drawing_timer!
+  round = nil
+  started_now = false
+
+  @game_room.with_lock do
+    round = current_round!
+
+    unless round.drawer_id == @player.id
+      raise Error, "Only the drawer can start the drawing timer."
+    end
+
+    unless @game_room.status == "drawing" && round.status == "drawing"
+      raise Error, "The round is not currently drawing."
+    end
+
+    if round.started_at.nil?
+      round.update!(started_at: Time.current)
+      started_now = true
+    end
+  end
+
+  if started_now
+    RoundTimeoutJob
+      .set(wait_until: round.started_at + @game_room.round_duration.seconds)
+      .perform_later(round.id)
+  end
+
+  round
+end
 
 def draw_stroke!(stroke)
   round = nil
