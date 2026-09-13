@@ -56,6 +56,13 @@ class GameRoomGameDrawingTest < ActiveSupport::TestCase
     )
 
     shape, pen = @round.reload.strokes
+    assert_equal "triangle", shape.fetch("shape")
+    assert_equal({
+      "x" => 0.1,
+      "y" => 0.1,
+      "width" => 0.3,
+      "height" => 0.2
+    }, shape.fetch("bounds"))
     assert_equal 4, shape.fetch("points").length
     assert_equal "#abcdef", shape.fetch("fill")
     assert pen.fetch("closed")

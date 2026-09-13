@@ -207,20 +207,13 @@ end
   # --------------------------------------------------------------------------
 
 def draw_live(data)
-  round = live_drawing_round!
+  data = data.to_h.stringify_keys
+  round = active_editor_round!(data, cached: true)
+  return unless round
 
   unless round.drawer_id == @player.id
     raise GameRoomGame::Error,
           "Only the drawer can draw."
-  end
-
-  deadline =
-    round.started_at +
-    @game_room.round_duration.seconds
-
-  if Time.current >= deadline
-    raise GameRoomGame::Error,
-          "Time is up."
   end
 
   payload = sanitize_live_stroke(data)
@@ -304,6 +297,7 @@ rescue StandardError => e
 end
 
 def draw_stroke(data)
+  data = data.to_h.stringify_keys
   stroke = sanitize_stroke(data)
 
   # --------------------------------------------------------------------------
@@ -356,19 +350,7 @@ def draw_stroke(data)
   # Persist the operation
   # --------------------------------------------------------------------------
 
-  live_round = live_drawing_round!
-
-  deadline =
-    live_round.started_at +
-    @game_room.round_duration.seconds
-
-  if Time.current >= deadline
-    transmit(
-      type: "game_error",
-      message: "Time is up."
-    )
-    return
-  end
+  return unless active_editor_round!(data)
 
   round =
     GameRoomGame.draw_stroke!(
@@ -432,12 +414,10 @@ rescue StandardError => e
     e.backtrace.first(10).join("\n")
   )
 
-  transmit(
-    {
-      type: "game_error",
-      message: "Unable to save that stroke."
-    }
-  )
+  message = "Unable to save that stroke."
+  message = "#{message} #{e.class}: #{e.message}" if Rails.env.development?
+
+  transmit(type: "game_error", message: message)
 end
 
 # --------------------------------------------------------------------------
@@ -445,6 +425,8 @@ end
 # --------------------------------------------------------------------------
 
 def reorder_layers(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_layer_reorder(data)
 
   round =
@@ -493,6 +475,8 @@ end
 # --------------------------------------------------------------------------
 
 def update_object(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_object_update(data)
 
   round =
@@ -537,6 +521,8 @@ end
 # --------------------------------------------------------------------------
 
 def delete_object(data)
+  return unless active_editor_round!(data)
+
   operation = sanitize_object_delete(data)
 
   round =
@@ -581,6 +567,8 @@ end
 # --------------------------------------------------------------------------
 
 def undo_stroke(data)
+  return unless active_editor_round!(data)
+
   stroke_id =
     data["stroke_id"].to_s.first(100)
 
@@ -654,6 +642,8 @@ end
   # --------------------------------------------------------------------------
 
   def clear_canvas(data = {})
+  return unless active_editor_round!(data)
+
   operation = sanitize_canvas_clear(data)
 
   # --------------------------------------------------------------
@@ -727,44 +717,43 @@ def unsubscribed
 
   GameRoomBroadcaster.lobby_updated(game_room)
 
-  # ------------------------------------------------------------------------
-  # If this player was the active drawer, immediately end the round.
-  # ------------------------------------------------------------------------
-
-  game_room.reload
-
-  return unless game_room.status == "drawing"
-
-  round = game_room.rounds.find_by(
-    game_number: game_room.game_number,
-    number: game_room.current_round
-  )
-
-  return unless round&.status == "drawing"
-  return unless round.drawer_id == player.id
-
-  Rails.logger.info(
-    "[GameRoomChannel] Drawer disconnected; " \
-    "ending round immediately " \
-    "room=#{game_room.code} " \
-    "player=#{player.id} " \
-    "round=#{round.id}"
-  )
-
-  GameRoomGame
-    .new(game_room, player)
-    .end_round!(
-      round,
-      reason: :drawer_disconnected
-    )
+  # A WebSocket disconnect is not the same as leaving the room. Refreshes,
+  # mobile network changes, and HMR all disconnect briefly. Keep the active
+  # round alive so the drawer can reconnect; the existing timeout job remains
+  # responsible for ending an abandoned round.
 end
 
   private
 
-  def live_drawing_round!
+  def active_editor_round!(data, cached: false)
+  data = data.to_h.stringify_keys
+  round = live_drawing_round!(
+    data["round_id"],
+    refresh: !cached
+  )
+
+  deadline =
+    round.started_at +
+    @game_room.round_duration.seconds
+
+  if Time.current >= deadline
+    GameRoomGame.end_round!(
+      @game_room,
+      round
+    )
+    return nil
+  end
+
+  round
+end
+
+  def live_drawing_round!(expected_round_id = nil, refresh: false)
+  expected_round_id = expected_round_id.to_i if expected_round_id.present?
   round = @live_drawing_round
 
-  if round
+  if !refresh &&
+     round &&
+     (!expected_round_id || round.id == expected_round_id)
     return round
   end
 
@@ -777,6 +766,11 @@ end
     )
 
   raise GameRoomGame::Error, "No active round." unless round
+
+  if expected_round_id && round.id != expected_round_id
+    raise GameRoomGame::Error,
+          "The drawing round changed. Please try again."
+  end
 
   unless @game_room.status == "drawing" &&
          round.status == "drawing"
@@ -826,6 +820,16 @@ def sync_current_game_state
   )
 
   return unless round
+
+  if round.status == "drawing" &&
+     round.started_at &&
+     Time.current >= round.started_at + @game_room.round_duration.seconds
+    GameRoomGame.end_round!(
+      @game_room,
+      round
+    )
+    return
+  end
 
   # --------------------------------------------------------------------------
   # Ready / starting phase

@@ -130,7 +130,7 @@ export default function ColorPicker({
       </div>
 
       {showColorPicker && (
-        <div className="absolute left-3 top-full z-[90] mt-1 w-[272px] overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl">
+        <div className="absolute left-3 top-full z-[90] mt-1 max-h-[calc(100dvh-250px)] w-[272px] touch-pan-y overflow-y-auto overscroll-contain rounded-2xl border border-zinc-700 bg-zinc-900 p-3 text-white shadow-2xl">
           <div className="mb-3 flex items-center justify-between">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">

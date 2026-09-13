@@ -1275,7 +1275,7 @@ def normalize_stroke(stroke)
         end
     end
 
-    normalized
+    return normalized
   elsif type == "fill"
     point =
       Array(stroke["point"])

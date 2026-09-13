@@ -1454,7 +1454,10 @@ function drawStroke(stroke) {
 
   subscriptionRef.current.perform(
     command,
-    stroke
+    {
+      ...stroke,
+      round_id: roundId,
+    }
   )
 }
 
@@ -1471,23 +1474,33 @@ function undoStroke(strokeId) {
     "undo_stroke",
     {
       stroke_id: strokeId,
+      round_id: currentRoundRef.current.id,
     }
   )
 }
 
 function sendLiveStroke(data) {
-  if (!subscriptionRef.current) {
+  if (
+    !subscriptionRef.current ||
+    !currentRoundRef.current?.id
+  ) {
     return
   }
 
   subscriptionRef.current.perform(
     "draw_live",
-    data
+    {
+      ...data,
+      round_id: currentRoundRef.current.id,
+    }
   )
 }
 
   function clearCanvas(operation) {
-    if (!subscriptionRef.current) {
+    if (
+      !subscriptionRef.current ||
+      !currentRoundRef.current?.id
+    ) {
       return
     }
 
@@ -1505,7 +1518,10 @@ function sendLiveStroke(data) {
 
     subscriptionRef.current.perform(
       "clear_canvas",
-      operation
+      {
+        ...operation,
+        round_id: currentRoundRef.current.id,
+      }
     )
   }
 
@@ -2250,49 +2266,6 @@ return (
                 </div>
               )}
 
-            {/* ========================================================= */}
-            {/* DRAWER CLEAR                                                */}
-            {/* ========================================================= */}
-
-            {isDrawer && (
-              <div
-                className="pointer-events-none absolute bottom-0 left-0 z-[60]"
-                style={{
-                  paddingBottom:
-                    "calc(env(safe-area-inset-bottom) + 12px)",
-                }}
-              >
-                <div className="px-3">
-                  <button
-                    type="button"
-                    onClick={clearCanvas}
-                    disabled={
-                      timeLeft === null ||
-                      timeLeft <= 0 ||
-                      strokes.length === 0
-                    }
-                    className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-zinc-700/80 bg-zinc-950/90 px-4 py-3 text-sm font-semibold text-zinc-300 shadow-xl backdrop-blur-md transition active:scale-95 disabled:opacity-30"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      className="h-4 w-4"
-                      aria-hidden="true"
-                    >
-                      <path d="M3 6h18" />
-                      <path d="M8 6V4h8v2" />
-                      <path d="M19 6l-1 14H6L5 6" />
-                      <path d="M10 11v5" />
-                      <path d="M14 11v5" />
-                    </svg>
-
-                    Clear
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         </section>
 
@@ -2318,20 +2291,6 @@ return (
                     </p>
                   </div>
 
-                  {isDrawer && (
-                    <button
-                      type="button"
-                      onClick={clearCanvas}
-                      disabled={
-                        timeLeft === null ||
-                        timeLeft <= 0 ||
-                        strokes.length === 0
-                      }
-                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-                    >
-                      Clear
-                    </button>
-                  )}
                 </div>
               </div>
 
