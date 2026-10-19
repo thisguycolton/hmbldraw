@@ -37,7 +37,7 @@ gem "thruster", require: false
 gem "rails_vite" # Vite integration [https://github.com/skryukov/rails_vite]
 
 # The Rails adapter for Inertia.js [https://inertia-rails.dev]
-gem "inertia_rails", "~> 3.21"
+gem "inertia_rails", "~> 3.23"
 
 # Brings Rails named routes to javascript
 gem "typelizer"
