@@ -74,7 +74,7 @@ GEM
       uri (>= 0.13.1)
     addressable (2.9.0)
       public_suffix (>= 2.0.2, < 8.0)
-    alba (4.0.0)
+    alba (4.0.1)
     alba-inertia (0.1.4)
       alba
       inertia_rails
